@@ -1,0 +1,23 @@
+[project]
+name = "repl-nix-workspace"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4>=4.15.0",
+    "colorama>=0.4.6",
+    "gtts>=2.5.4",
+    "httpx[socks]>=0.28.1",
+    "langdetect>=1.0.9",
+    "openpyxl>=3.1.5",
+    "paramiko>=5.0.0",
+    "phonenumbers>=9.0.34",
+    "pillow>=12.3.0",
+    "pysocks>=1.7.1",
+    "pytelegrambotapi>=4.36.0",
+    "python-dotenv>=1.2.2",
+    "python-socketio>=5.16.3",
+    "qrcode>=8.2",
+    "requests[socks]>=2.34.2",
+    "websocket-client>=1.9.0",
+]
