@@ -254,16 +254,17 @@ PAKASIR_BASE     = "https://app.pakasir.com"
 
 # Harga paket: {tier: {durasi_hari: harga_rupiah}}
 PACKAGE_PRICES = {
-    "starter": {1: 5_000,   7: 25_000,   30: 75_000},
-    "pro":     {1: 10_000,  7: 50_000,   30: 150_000},
-    "elite":   {1: 20_000,  7: 100_000,  30: 250_000},
-    "ultra":   {1: 35_000,  7: 175_000,  30: 450_000},
+    "starter": {7: 25_000,  15: 50_000,  30: 100_000},
+    "pro":     {7: 75_000,  15: 140_000, 30: 250_000},
+    "elite":   {7: 150_000, 15: 280_000, 30: 500_000},
+    "ultra":   {7: 250_000, 15: 480_000, 30: 900_000},
 }
 DURATION_INFO = {
-    1:  {"label": "Harian",   "emoji": "📅"},
-    7:  {"label": "Mingguan", "emoji": "📆"},
-    30: {"label": "Bulanan",  "emoji": "🗓️"},
+    7:  {"label": "7 Hari",  "emoji": "📅"},
+    15: {"label": "15 Hari", "emoji": "📆"},
+    30: {"label": "30 Hari", "emoji": "🗓️"},
 }
+QRIS_PATH = "./qris.jpg"  # Foto QRIS statis untuk pembayaran manual
 
 SERVICE_SHORT = {
     "WHATSAPP": "#WS", "TELEGRAM": "#TG", "GOOGLE": "#G", "FACEBOOK": "#FB",
@@ -278,9 +279,9 @@ sms_stats = {
 last_update_id = 0
 MAX_EMAIL = 20 # Setting Max Email User/Owner
 TOKEN_TIERS = {
-    "free":    {"label": "FREE",    "emoji": "👤", "tokens_day": 8,    "max_email": 1},
-    "starter": {"label": "STARTER", "emoji": "⭐", "tokens_day": 50,    "max_email": 3},
-    "pro":     {"label": "PRO",     "emoji": "💎", "tokens_day": 150,   "max_email": 8},
+    "free":    {"label": "FREE",    "emoji": "👤", "tokens_day": 3,     "max_email": 1},
+    "starter": {"label": "PREMIUM", "emoji": "⭐", "tokens_day": 100,   "max_email": 5},
+    "pro":     {"label": "PRO",     "emoji": "💎", "tokens_day": 300,   "max_email": 10},
     "elite":   {"label": "ELITE",   "emoji": "🔥", "tokens_day": 500,   "max_email": 15},
     "ultra":   {"label": "ULTRA",   "emoji": "👑", "tokens_day": 99999, "max_email": 20},
 }
@@ -632,7 +633,7 @@ def get_or_create_user_key(user_id):
     return users[uid]["key"]
 
 # ================= TOKEN SYSTEM =================
-TOKEN_MAX = 5  # token default free user per hari (reset jam 00:00 WIB)
+TOKEN_MAX = 3  # token default free user per hari (reset jam 00:00 WIB)
 
 def get_wib_date():
     """Return tanggal hari ini dalam WIB (UTC+7)."""
@@ -692,7 +693,9 @@ def no_token_msg(chat_id):
     send_msg(chat_id,
         "❌ <b>Token habis!</b>\n\n"
         "<blockquote>Token kamu sudah habis hari ini.\n"
-        "Reset otomatis jam <b>00:00 WIB</b>.</blockquote>"
+        "Reset otomatis jam <b>00:00 WIB</b>.\n\n"
+        "💡 Upgrade ke PREMIUM untuk token lebih banyak!\n"
+        "Ketik /beli untuk lihat paket.</blockquote>"
     )
 
 # ===== PREMIUM ACCOUNT SESSION CACHE =====
@@ -1488,22 +1491,22 @@ def cmd_beli(chat_id, user_id):
     t_cur = TOKEN_TIERS.get(tier, TOKEN_TIERS["free"])
     aktif_tag = f"  ✅ aktif" if tier != "free" else ""
     msg = (
-        "🛒 <b>PAKET TOKEN IVAS</b>\n\n"
+        "🛒 <b>PAKET PREMIUM SPIDERMAT BOT</b>\n\n"
         "<blockquote>"
-        "Pilih paket untuk melihat detail benefit.\n"
-        f"Paket kamu saat ini: {t_cur['emoji']} <b>{t_cur['label']}</b>{aktif_tag}"
+        f"Paket kamu saat ini: {t_cur['emoji']} <b>{t_cur['label']}</b>{aktif_tag}\n\n"
+        "⭐ <b>PREMIUM</b> — 100 token/hari, 5 akun IVAS\n"
+        "  📅 7 Hari   : <b>Rp 25.000</b>\n"
+        "  📆 15 Hari  : <b>Rp 50.000</b>\n"
+        "  🗓️ 30 Hari  : <b>Rp 100.000</b>\n\n"
+        "Bayar via QRIS — konfirmasi ke owner setelah transfer."
         "</blockquote>\n\n"
-        "👇 Pilih paket:"
+        "👇 Pilih durasi:"
     )
+    prices_s = PACKAGE_PRICES.get("starter", {})
     rows = [
-        [
-            {"text": "⭐ STARTER", "callback_data": "pkg_info:starter"},
-            {"text": "💎 PRO",     "callback_data": "pkg_info:pro"},
-        ],
-        [
-            {"text": "🔥 ELITE",   "callback_data": "pkg_info:elite"},
-            {"text": "👑 ULTRA",   "callback_data": "pkg_info:ultra"},
-        ]
+        [{"text": f"📅 7 Hari — Rp 25.000",  "callback_data": "pkg_buy:starter:7"}],
+        [{"text": f"📆 15 Hari — Rp 50.000", "callback_data": "pkg_buy:starter:15"}],
+        [{"text": f"🗓️ 30 Hari — Rp 100.000","callback_data": "pkg_buy:starter:30"}],
     ]
     send_inline_keyboard_grid(chat_id, msg, rows)
 
@@ -1737,9 +1740,46 @@ def handle_pkg_buy_cb(chat_id, user_id, data, cb_id, msg_id):
     if tier_key not in PACKAGE_PRICES or days not in PACKAGE_PRICES[tier_key]:
         send_msg(chat_id, "❌ Paket tidak valid.")
         return
+    amount = PACKAGE_PRICES[tier_key][days]
+    t = TOKEN_TIERS.get(tier_key, {})
+    label = t.get("label", tier_key.upper())
+    dur_info = DURATION_INFO[days]
+    ts = int(time.time())
+    order_id = f"SPIDER{user_id}{ts}"
+
+    delete_msg(chat_id, msg_id)
+
+    # ── Mode QRIS Statis (tanpa Pakasir) ─────────────────────────────────────
     if not PAKASIR_PROJECT or not PAKASIR_API_KEY:
-        send_msg(chat_id, "❌ Pembayaran belum dikonfigurasi. Hubungi owner.")
+        caption = (
+            f"📲 <b>PEMBAYARAN QRIS — {t.get('emoji','')} {label} {dur_info['label']}</b>\n\n"
+            f"<blockquote>"
+            f"💰 Nominal    : <b>Rp {amount:,}</b>\n".replace(",", ".") +
+            f"📋 Order ID   : <code>{order_id}</code>\n\n"
+            f"📝 <b>Cara Bayar:</b>\n"
+            f"1. Scan QR di atas dengan m-banking / e-wallet\n"
+            f"2. Transfer tepat <b>Rp {amount:,}</b> ke atas\n".replace(",", ".") +
+            f"3. Screenshot bukti bayar, kirim ke owner\n"
+            f"4. Owner akan aktivasi paket kamu manual\n"
+            f"</blockquote>\n\n"
+            f"📩 <b>Kirim bukti ke owner:</b> <a href='https://{LINK_OWNER}'>Contact Owner</a>"
+        )
+        try:
+            if os.path.exists(QRIS_PATH):
+                with open(QRIS_PATH, "rb") as f:
+                    requests.post(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+                        data={"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"},
+                        files={"photo": f},
+                        timeout=15
+                    )
+            else:
+                send_msg(chat_id, caption)
+        except Exception as e:
+            send_msg(chat_id, caption)
         return
+
+    # ── Mode Pakasir (pembayaran otomatis) ────────────────────────────────────
     if user_id in pending_payments:
         old = pending_payments[user_id]
         send_msg(chat_id,
@@ -1747,13 +1787,6 @@ def handle_pkg_buy_cb(chat_id, user_id, data, cb_id, msg_id):
             f"Selesaikan dulu atau batalkan dengan tombol di bawah QR sebelumnya."
         )
         return
-
-    amount = PACKAGE_PRICES[tier_key][days]
-    t = TOKEN_TIERS.get(tier_key, {})
-    label = t.get("label", tier_key.upper())
-    dur_info = DURATION_INFO[days]
-    ts = int(time.time())
-    order_id = f"IVAS{user_id}{ts}"
 
     loading_msg = send_msg_return_id(chat_id,
         f"⏳ Membuat tagihan QRIS untuk paket <b>{t.get('emoji','')} {label}</b> "
@@ -1808,7 +1841,6 @@ def handle_pkg_buy_cb(chat_id, user_id, data, cb_id, msg_id):
         "order_id": order_id, "tier": tier_key, "days": days,
         "amount": amount, "chat_id": chat_id, "qr_msg_id": qr_msg_id
     }
-    delete_msg(chat_id, msg_id)
     threading.Thread(
         target=payment_checker,
         args=(user_id, chat_id, order_id, tier_key, days, amount, qr_msg_id),
@@ -1875,19 +1907,28 @@ def check_force_join(user_id):
     not_joined = []
     for ch in FORCE_JOIN_CHANNELS:
         try:
+            username = ch["username"].lstrip("@")
+            chat_id_arg = username if not username.lstrip("-").isdigit() else int(username)
             r = _tg_request("getChatMember", data={
-                "chat_id": f"@{ch['username']}",
+                "chat_id": f"@{username}" if isinstance(chat_id_arg, str) else chat_id_arg,
                 "user_id": user_id
             })
-            if r:
-                res = r.json()
-                if res.get("ok"):
-                    status = res["result"]["status"]
-                    if status in ("member", "administrator", "creator"):
-                        continue
-        except Exception:
-            pass
-        not_joined.append(ch)
+            if not r:
+                continue  # Network error → skip, jangan block user
+            res = r.json()
+            if not res.get("ok"):
+                # Channel tidak ditemukan / bot bukan admin → skip, jangan block user
+                _log("FORCEJOIN", f"skip '{username}': {res.get('description','?')}", Fore.YELLOW)
+                continue
+            status = res["result"]["status"]
+            if status in ("member", "administrator", "creator"):
+                continue  # Sudah join ✅
+            if status == "left":
+                not_joined.append(ch)  # Belum join → blokir
+            # "kicked"/"restricted" → skip (jangan blokir)
+        except Exception as e:
+            _log("FORCEJOIN", f"error cek '{ch.get('username','?')}': {e}", Fore.YELLOW)
+            continue  # Error → skip, jangan block user
     return not_joined
 
 def send_force_join_msg(chat_id, not_joined):

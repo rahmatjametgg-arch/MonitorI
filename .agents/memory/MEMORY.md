@@ -1,0 +1,1 @@
+- [SPIDERMAT OTP BOT config](bot-config.md) — pricing, payment, force-join fix, deployment, DB layer decisions
