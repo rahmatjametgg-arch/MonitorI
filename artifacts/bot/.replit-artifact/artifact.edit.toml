@@ -1,0 +1,22 @@
+kind = "api"
+previewPath = "/bot-status"
+title = "SPIDERMAT OTP BOT"
+version = "1.0.0"
+id = "spidermat-otp-bot-v1"
+
+[[services]]
+localPort = 5000
+name = "SPIDERMAT OTP BOT"
+paths = ["/bot-status"]
+
+[services.development]
+run = "cd bot && python main.py"
+
+[services.production]
+
+[services.production.run]
+args = ["python", "bot/main.py"]
+
+[services.production.health.startup]
+path = "/health"
+timeout = 60

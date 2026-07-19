@@ -13,6 +13,7 @@ dependencies = [
     "paramiko>=5.0.0",
     "phonenumbers>=9.0.34",
     "pillow>=12.3.0",
+    "psycopg2-binary>=2.9.12",
     "pysocks>=1.7.1",
     "pytelegrambotapi>=4.36.0",
     "python-dotenv>=1.2.2",

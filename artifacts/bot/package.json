@@ -1,0 +1,6 @@
+{
+  "name": "@workspace/spidermat-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SPIDERMAT OTP BOT — Telegram long-poll service"
+}

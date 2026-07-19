@@ -13,6 +13,16 @@ import phonenumbers
 from phonenumbers import geocoder
 import requests
 import signal
+# ── Database layer (PostgreSQL persistence) ──────────────────────────────────
+try:
+    from db import db_init, db_save, db_save_async, db_load
+    _DB_ENABLED = True
+except ImportError:
+    def db_init(): pass
+    def db_save(k, v): pass
+    def db_save_async(k, v): pass
+    def db_load(k, default=None): return default
+    _DB_ENABLED = False
 import sys
 from langdetect import detect, LangDetectException, DetectorFactory
 from colorama import init, Fore, Style
@@ -365,15 +375,25 @@ _force_bot_sync   = False
 
 # ================= ACCOUNT MANAGEMENT =================
 def load_accounts():
-    if not os.path.exists(ACCOUNTS_FILE):
-        with open(ACCOUNTS_FILE, "w") as f:
-            f.write('{"accounts":[]}')
-    try:
-        with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data.get("accounts", [])
-    except:
-        return []
+    # Coba dari file dulu, fallback ke DB
+    if os.path.exists(ACCOUNTS_FILE):
+        try:
+            with open(ACCOUNTS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                saved = data.get("accounts", [])
+                if saved:
+                    return saved
+        except:
+            pass
+    # Fallback ke database
+    saved = db_load("accounts", [])
+    if saved:
+        try:
+            with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
+                json.dump({"accounts": saved}, f, indent=2)
+        except:
+            pass
+    return saved
 
 def save_accounts():
     data_to_save = []
@@ -383,33 +403,56 @@ def save_accounts():
             "password": acc.get("password"),
             "cookies": acc.get("cookies", {})
         })
-    with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
-        json.dump({"accounts": data_to_save}, f, indent=2)
+    try:
+        with open(ACCOUNTS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"accounts": data_to_save}, f, indent=2)
+    except Exception as e:
+        print(f"[SAVE] accounts file error: {e}")
+    db_save_async("accounts", data_to_save)
 
 def load_cookies():
-    if not os.path.exists(COOKIES_FILE):
-        with open(COOKIES_FILE, "w") as f:
-            f.write("{}")
-        return {}
-    try:
-        with open(COOKIES_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {}
+    if os.path.exists(COOKIES_FILE):
+        try:
+            with open(COOKIES_FILE, "r", encoding="utf-8") as f:
+                d = json.load(f)
+                if d:
+                    return d
+        except:
+            pass
+    saved = db_load("cookies", {})
+    if saved:
+        try:
+            with open(COOKIES_FILE, "w", encoding="utf-8") as f:
+                json.dump(saved, f, indent=2)
+        except:
+            pass
+    return saved
 
 def load_premium():
-    if not os.path.exists(PREMIUM_FILE):
-        with open(PREMIUM_FILE, "w") as f:
-            json.dump({}, f)
-    try:
-        with open(PREMIUM_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {}
+    if os.path.exists(PREMIUM_FILE):
+        try:
+            with open(PREMIUM_FILE, "r") as f:
+                d = json.load(f)
+                if d:
+                    return d
+        except:
+            pass
+    saved = db_load("premium", {})
+    if saved:
+        try:
+            with open(PREMIUM_FILE, "w") as f:
+                json.dump(saved, f, indent=2)
+        except:
+            pass
+    return saved
 
 def save_premium(data):
-    with open(PREMIUM_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    try:
+        with open(PREMIUM_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[SAVE] premium file error: {e}")
+    db_save_async("premium", data)
 
 premium_users = load_premium()
 
@@ -435,8 +478,12 @@ def is_premium(user_id):
     return get_user_tier(user_id) != "free"
     
 def save_cookies(cookies_dict):
-    with open(COOKIES_FILE, "w") as f:
-        json.dump(cookies_dict, f, indent=2)
+    try:
+        with open(COOKIES_FILE, "w") as f:
+            json.dump(cookies_dict, f, indent=2)
+    except Exception as e:
+        print(f"[SAVE] cookies file error: {e}")
+    db_save_async("cookies", cookies_dict)
 
 def extract_session_cookies(session):
     """Ekstrak semua cookies dari httpx session sebagai dict (fresh cookies)."""
@@ -461,52 +508,84 @@ def save_fresh_cookies_auto(email, fresh_cookies):
             save_premium_cookies(prem)
 
 def load_groups():
-    if not os.path.exists(GROUPS_FILE):
-        with open(GROUPS_FILE, "w") as f:
-            json.dump({}, f)
-    try:
-        with open(GROUPS_FILE, "r") as f:
-            data = json.load(f)
-        # Backward compat: format lama {"groups": [...]} → convert ke dict kosong
-        if isinstance(data, list) or "groups" in data:
-            return {}
-        return data
-    except:
-        return {}
+    if os.path.exists(GROUPS_FILE):
+        try:
+            with open(GROUPS_FILE, "r") as f:
+                data = json.load(f)
+            if not (isinstance(data, list) or "groups" in data) and data:
+                return data
+        except:
+            pass
+    saved = db_load("groups", {})
+    if saved:
+        try:
+            with open(GROUPS_FILE, "w") as f:
+                json.dump(saved, f, indent=2)
+        except:
+            pass
+    return saved
 
 def load_users():
-    if not os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "w") as f:
-            json.dump({}, f)
-    try:
-        with open(USERS_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {}
+    if os.path.exists(USERS_FILE):
+        try:
+            with open(USERS_FILE, "r") as f:
+                d = json.load(f)
+                if d:
+                    return d
+        except:
+            pass
+    saved = db_load("users", {})
+    if saved:
+        try:
+            with open(USERS_FILE, "w") as f:
+                json.dump(saved, f, indent=2)
+        except:
+            pass
+    return saved
         
 def load_premium_cookies():
-    if not os.path.exists(PREMIUM_COOKIE_FILE):
-        with open(PREMIUM_COOKIE_FILE, "w") as f:
-            json.dump({}, f)
-    try:
-        with open(PREMIUM_COOKIE_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {}
+    if os.path.exists(PREMIUM_COOKIE_FILE):
+        try:
+            with open(PREMIUM_COOKIE_FILE, "r") as f:
+                d = json.load(f)
+                if d:
+                    return d
+        except:
+            pass
+    saved = db_load("premium_cookies", {})
+    if saved:
+        try:
+            with open(PREMIUM_COOKIE_FILE, "w") as f:
+                json.dump(saved, f, indent=2)
+        except:
+            pass
+    return saved
 
 def save_premium_cookies(data):
-    with open(PREMIUM_COOKIE_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    try:
+        with open(PREMIUM_COOKIE_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[SAVE] premium_cookies file error: {e}")
+    db_save_async("premium_cookies", data)
 
 premium_cookies = load_premium_cookies()        
 
 def save_users(data):
-    with open(USERS_FILE, "w") as f:
-        json.dump(data, f, indent=2)        
+    try:
+        with open(USERS_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        print(f"[SAVE] users file error: {e}")
+    db_save_async("users", data)
 
 def save_groups():
-    with open(GROUPS_FILE, "w") as f:
-        json.dump(user_groups, f, indent=2)
+    try:
+        with open(GROUPS_FILE, "w") as f:
+            json.dump(user_groups, f, indent=2)
+    except Exception as e:
+        print(f"[SAVE] groups file error: {e}")
+    db_save_async("groups", user_groups)
 
 user_groups = load_groups()
 
@@ -687,6 +766,7 @@ def save_sent_cache():
             sent_cache.update(cache_list)
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(cache_list, f)
+        db_save_async("sent_cache", cache_list)
     except Exception as e:
         print(f"Error save cache: {e}")
 
@@ -1999,7 +2079,7 @@ def handle_start(user_id, chat_id):
             "/listgrup"
             "</blockquote>\n\n"
             "🛒 <b>Upgrade Paket</b> → /beli\n"
-            f"📩 <a href='https://t.me/ceoleseh'>@ceoleseh</a>"
+            f"📩 <a href='https://{LINK_OWNER}'>Contact Owner</a>"
         )
 
     try:
@@ -2047,7 +2127,7 @@ def add_email(text, chat_id, user_id, msg_id):
                     f"❌ <b>Limit akun FREE: {email_limit}</b>\n\n"
                     f"<blockquote>Upgrade paket untuk tambah lebih banyak akun.\n"
                     f"Ketik /beli untuk lihat paket tersedia.\n"
-                    f"📩 <a href='https://t.me/ceoleseh'>@ceoleseh</a></blockquote>")
+                    f"📩 <a href='https://{LINK_OWNER}'>Contact Owner</a></blockquote>")
             else:
                 return send_msg(chat_id,
                     f"❌ Limit paket {t_d['emoji']} <b>{t_d['label']}</b>: maksimal {email_limit} akun!\n\n"
@@ -4938,7 +5018,7 @@ def listen_command():
                             if not_joined:
                                 send_force_join_msg(chat_id, not_joined)
                                 continue
-                        handle_start(user_id, chat_id)
+                        threading.Thread(target=handle_start, args=(user_id, chat_id), daemon=True).start()
                     elif text.startswith("/cekivasv2"):
                         threading.Thread(target=cek_ivas_v2, args=(chat_id, user_id), daemon=True).start()
                         send_activity_log(user_id, udisp, "/cekivasv2")
@@ -5980,6 +6060,7 @@ def _init_bot_username():
     except Exception as e:
         _log("BOT", f"getMe error: {e}", Fore.YELLOW)
 _init_bot_username()
+db_init()
 
 _print_banner(BOT_USERNAME)
 
