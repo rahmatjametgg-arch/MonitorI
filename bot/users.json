@@ -1,1 +1,25 @@
-{}
+{
+  "7832420302": {
+    "emails": [],
+    "tokens": 0,
+    "last_token_reset": "2026-07-20",
+    "key": "KX-41B2-D8E8"
+  },
+  "6884022678": {
+    "emails": [
+      "rahmatid27@gmail.com"
+    ],
+    "user_accounts": [
+      {
+        "email": "rahmatid27@gmail.com",
+        "password": "Bangke123"
+      }
+    ]
+  },
+  "6241412958": {
+    "emails": [],
+    "tokens": 3,
+    "last_token_reset": "2026-07-20",
+    "key": "KX-D518-A296"
+  }
+}

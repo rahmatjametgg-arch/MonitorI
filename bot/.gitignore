@@ -1,5 +1,25 @@
+# Secrets
 .env
+*.env
+
+# Data files (akan dibuat ulang oleh bot)
+accounts.json
+cookie.json
+premium.json
+premium-cookie.json
+groups.json
+users.json
+file/sent_cache.json
+
+# Python cache
 *.pyc
 __pycache__/
+*.pyo
+*.pyd
+.Python
+
+# Zip backup
 *.zip
-file/sent_cache.json
+
+# Audio generated
+voice/*.mp3

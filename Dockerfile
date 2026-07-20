@@ -2,23 +2,35 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# System deps for Pillow, audio, etc.
+# ── System deps ──────────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc libfreetype6 libjpeg62-turbo libpng-dev libwebp-dev \
-    ffmpeg curl && rm -rf /var/lib/apt/lists/*
+    gcc \
+    libfreetype6 \
+    libjpeg62-turbo \
+    libpng-dev \
+    libwebp-dev \
+    ffmpeg \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Python deps
-COPY bot/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# ── Python deps ───────────────────────────────────────────────────────────────
+COPY bot/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Copy bot files
-COPY bot/ ./bot/
+# ── Bot source ────────────────────────────────────────────────────────────────
+# Salin seluruh folder bot/ → /app/bot/
+COPY bot/ /app/bot/
 
-# Expose keepalive port
+# Buat folder data yang dibutuhkan
+RUN mkdir -p /app/bot/file /app/bot/voice
+
+# ── Runtime ───────────────────────────────────────────────────────────────────
+WORKDIR /app/bot
+
+# Port keepalive / health check (Railway assign via $PORT, default 5000)
 EXPOSE 5000
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-5000}/health || exit 1
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=5 \
+    CMD curl -sf http://localhost:${PORT:-5000}/health || exit 1
 
-WORKDIR /app/bot
-CMD ["python", "main.py"]
+CMD ["python", "-u", "main.py"]
