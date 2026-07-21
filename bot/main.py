@@ -4635,50 +4635,127 @@ def stats_sms(chat_id=None):
     else:
         tg_active(msg)                        
 
+def _csrf_from_html(html_text):
+    """
+    Ekstrak CSRF token dari HTML dengan 3 metode fallback.
+    Sama seperti get_recv_csrf() supaya konsisten di seluruh kode.
+    """
+    soup = BeautifulSoup(html_text, "html.parser")
+    # 1. <input type="hidden" name="_token" value="...">
+    inp = soup.find("input", {"name": "_token"})
+    if inp and inp.get("value"):
+        return inp["value"]
+    # 2. <meta name="csrf-token" content="...">
+    meta = soup.find("meta", {"name": "csrf-token"})
+    if meta and meta.get("content"):
+        return meta["content"]
+    # 3. JS inline: "_token":"xxxx" atau _token: "xxxx"
+    import re as _re
+    m = _re.search(r"""["']_token["']\s*[,:]?\s*["']([A-Za-z0-9_\-+/=]{20,})["']""", html_text)
+    if m:
+        return m.group(1)
+    return None
+
+
 def login(acc, _retry=0):
     session = acc["session"]
-    email = acc["email"]
-    password = acc["password"]
+    email   = acc["email"]
+    password = acc.get("password") or ""
+
+    if not password:
+        _log("LOGIN", f"Tidak ada password untuk [{email}]", Fore.YELLOW)
+        return False
+
+    # ── Jika sudah di /portal, session masih aktif — skip re-login ──
+    try:
+        r_chk = session.get(f"{_IVAS_ORIGIN}/portal", timeout=15,
+                            headers={"X-Requested-With": None})
+        if r_chk.status_code == 200 and "/login" not in str(r_chk.url):
+            _log("LOGIN", f"Sudah login [{email}] — skip", Fore.GREEN)
+            tok = _csrf_from_html(r_chk.text)
+            if tok:
+                acc["csrf_token"] = tok
+            return True
+    except Exception:
+        pass
 
     worker_before = _IVAS_ORIGIN
-    r = session.get(LOGIN_URL)
+
+    # ── GET halaman login — WAJIB tanpa X-Requested-With ──
+    # Jika header XHR dikirim ke GET /login, Laravel menganggapnya AJAX
+    # dan mengembalikan JSON / response berbeda tanpa form HTML + CSRF token.
+    try:
+        r = session.get(LOGIN_URL, timeout=20,
+                        headers={"X-Requested-With": None,
+                                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"})
+    except Exception as e:
+        _log("LOGIN", f"GET /login error [{email}]: {e}", Fore.RED)
+        return False
+
     if is_worker_blocked(resp=r) and _retry < len(WORKER_POOL) - 1:
         mark_worker_limited(worker_before)
         return login(acc, _retry=_retry + 1)
 
-    soup = BeautifulSoup(r.text, "html.parser")
-    token_input = soup.find("input", {"name": "_token"})
-
-    if not token_input:
-        print("  CSRF TOKEN TIDAK DITEMUKAN")
+    # IVAS 429 — exponential backoff, bukan rotasi worker
+    if r.status_code == 429:
+        wait = min(20 * (2 ** _retry), 120)
+        _log("LOGIN", f"IVAS 429 [{email}] — tunggu {wait}s lalu retry", Fore.YELLOW)
+        time.sleep(wait)
+        if _retry < 4:
+            return login(acc, _retry=_retry + 1)
         return False
 
-    token = token_input["value"]
+    # Sudah redirect ke /portal → session masih hidup
+    if "/portal" in str(r.url):
+        _log("LOGIN", f"Redirect ke portal [{email}] — session aktif", Fore.GREEN)
+        tok = _csrf_from_html(r.text)
+        if tok:
+            acc["csrf_token"] = tok
+        return True
+
+    token = _csrf_from_html(r.text)
+    if not token:
+        _log("LOGIN", f"CSRF TIDAK DITEMUKAN [{email}] (status={r.status_code}, url={r.url})", Fore.RED)
+        _log("LOGIN", f"HTML[:200]={r.text[:200]!r}", Fore.RED)
+        if _retry < 2:
+            time.sleep(10)
+            return login(acc, _retry=_retry + 1)
+        return False
+
     acc["csrf_token"] = token
-
     session.headers.update({
-        "X-CSRF-TOKEN": token,
-        "X-Requested-With": "XMLHttpRequest"
+        "X-CSRF-TOKEN":     token,
+        "X-Requested-With": "XMLHttpRequest",
     })
 
-    r2 = session.post(LOGIN_URL, data={
-        "_token": token,
-        "email": email,
-        "password": password
-    })
+    # POST login
+    try:
+        r2 = session.post(LOGIN_URL, data={
+            "_token":   token,
+            "email":    email,
+            "password": password,
+        }, timeout=20)
+    except Exception as e:
+        _log("LOGIN", f"POST /login error [{email}]: {e}", Fore.RED)
+        return False
 
     if is_worker_blocked(resp=r2) and _retry < len(WORKER_POOL) - 1:
         mark_worker_limited(worker_before)
         return login(acc, _retry=_retry + 1)
 
-    print("LOGIN RESPONSE URL:", r2.url)
+    if r2.status_code == 429:
+        wait = min(20 * (2 ** _retry), 120)
+        _log("LOGIN", f"IVAS 429 POST [{email}] — tunggu {wait}s lalu retry", Fore.YELLOW)
+        time.sleep(wait)
+        if _retry < 4:
+            return login(acc, _retry=_retry + 1)
+        return False
+
+    _log("LOGIN", f"Response URL: {r2.url}", Fore.CYAN)
 
     if "/portal" in str(r2.url) or "Dashboard" in r2.text or "portal" in r2.text.lower():
-        print("  LOGIN BERHASIL")
+        _log("LOGIN", f"BERHASIL [{email}]", Fore.GREEN)
         # ── FRESH COOKIE AUTO-CAPTURE ──
-        # WAJIB langsung ambil & simpan cookie session terbaru setelah login sukses,
-        # supaya penambahan akun lain (add_account/addcookie) tidak menimpa/nabrak
-        # cookie akun ini. Simpan per-email, dikunci lock supaya thread-safe.
         fresh = extract_session_cookies(session)
         if fresh:
             acc["cookies"] = fresh
@@ -4687,10 +4764,10 @@ def login(acc, _retry=0):
                 all_cookies = load_cookies()
                 all_cookies[email] = fresh
                 save_cookies(all_cookies)
-            print(f"  FRESH COOKIE SAVED: {email} ({len(fresh)} keys)")
+            _log("LOGIN", f"Fresh cookie saved: {email} ({len(fresh)} keys)", Fore.GREEN)
         return True
     else:
-        print("  LOGIN GAGAL")
+        _log("LOGIN", f"GAGAL [{email}] — password salah atau perlu verifikasi", Fore.RED)
         return False
 
 def _is_login_page(r) -> bool:
@@ -5516,8 +5593,50 @@ def auto_cookie_refresher():
                                 except Exception:
                                     pass
                         else:
-                            # Kegagalan ke-2+ → session benar-benar expired, notif hard
-                            _log("KA-DEAD", f"({fail_n}x) {email} — session mati, notif user", Fore.RED)
+                            # Kegagalan ke-2+ → session benar-benar expired
+                            _log("KA-DEAD", f"({fail_n}x) {email} — session mati", Fore.RED)
+
+                            # ── AUTO RE-LOGIN jika ada password ──
+                            pw = acc.get("password", "")
+                            if pw and not _session_notified.get(email):
+                                _log("AUTO-LOGIN", f"Coba re-login [{email}]...", Fore.CYAN)
+                                try:
+                                    acc["session"] = make_httpx_client(timeout=20)
+                                    acc["last_login"] = 0
+                                    if login(acc):
+                                        fresh = extract_session_cookies(acc["session"])
+                                        if fresh:
+                                            acc["cookies"] = fresh
+                                            acc["last_login"] = now
+                                            save_fresh_cookies_auto(email, fresh)
+                                        _keepalive_warn_count[email] = 0
+                                        _session_notified.pop(email, None)
+                                        _session_fail_time.pop(email, None)
+                                        _session_retry_time.pop(email, None)
+                                        _session_recovered.pop(email, None)
+                                        _recv_csrf_cache.pop(email, None)
+                                        _log("AUTO-LOGIN", f"BERHASIL [{email}]", Fore.GREEN)
+                                        notif_target = uid if uid else OWNER_ID
+                                        try:
+                                            requests.post(
+                                                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                                                data={"chat_id": notif_target,
+                                                      "text": (f"✅ <b>AUTO RE-LOGIN BERHASIL</b>\n\n"
+                                                               f"📧 Email: <code>{email}</code>\n"
+                                                               f"🔑 Session diperbarui otomatis oleh bot"),
+                                                      "parse_mode": "HTML"},
+                                                timeout=10
+                                            )
+                                        except Exception:
+                                            pass
+                                        _last_cookie_refresh[email] = now
+                                        continue  # skip notif expired — sudah pulih
+                                    else:
+                                        _log("AUTO-LOGIN", f"Gagal [{email}]", Fore.RED)
+                                except Exception as _re_err:
+                                    _log("AUTO-LOGIN", f"Error [{email}]: {_re_err}", Fore.RED)
+
+                            # Tidak ada password / auto-login gagal → notif user
                             _notify_cookie_expired(email, uid)
                             if not _session_notified.get(email):
                                 _session_notified[email] = True
