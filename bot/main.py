@@ -4903,14 +4903,11 @@ def get_numbers(acc, rng, _retry=0):
     if is_worker_blocked(resp=r) and _retry < len(WORKER_POOL) - 1:
         mark_worker_limited(worker_before)
         return get_numbers(acc, rng, _retry=_retry + 1)
-    # IVAS 429 — tunggu lalu retry
+    # IVAS 429 — JANGAN block thread (ngeblok = OTP delay!)
+    # Skip cycle ini saja, polling loop akan retry otomatis dalam 1-3 detik
     if r.status_code == 429:
-        wait = min(30 * (2 ** _retry), 180)
         email = acc.get("email", "")
-        _log("MYRANGE", f"IVAS 429 [{email}] get_numbers — tunggu {wait}s", Fore.YELLOW)
-        time.sleep(wait)
-        if _retry < 3:
-            return get_numbers(acc, rng, _retry=_retry + 1)
+        _log("MYRANGE", f"IVAS 429 [{email}] get_numbers — skip cycle, retry otomatis", Fore.YELLOW)
         return []
     if _is_login_page(r):
         _invalidate_session(acc, f"SESSION_EXPIRED: get_numbers ({r.url})")
@@ -4934,12 +4931,11 @@ def get_sms(acc, rng, number, _retry=0):
     if is_worker_blocked(resp=r) and _retry < len(WORKER_POOL) - 1:
         mark_worker_limited(worker_before)
         return get_sms(acc, rng, number, _retry=_retry + 1)
-    # IVAS 429 — JANGAN block thread (ngeblok = OTP delay 2 menit+)
+    # IVAS 429 — JANGAN block thread (ngeblok = OTP delay!)
     # Cukup return [] sekarang, polling loop akan retry dalam 1-3 detik sendiri
     if r.status_code == 429:
         email = acc.get("email", "")
         _log("MYRANGE", f"IVAS 429 [{email}] get_sms — skip cycle ini, retry otomatis", Fore.YELLOW)
-        time.sleep(3)  # jeda singkat saja, bukan 30-180s
         return []
     if _is_login_page(r):
         _invalidate_session(acc, f"SESSION_EXPIRED: get_sms ({r.url})")
@@ -5411,27 +5407,31 @@ def poll_one_account(acc):
                 dial_code   = code.lstrip("+") if code else ""
                 last4       = full_num[-4:] if len(full_num) >= 4 else full_num
 
-            # Format Garage OTP: FLAG #CODE 📱 +DIALCODE 🏷️ LAST4 #SERVICE
+            # Format Garage OTP: FLAG #CODE 💬+DIALCODE 🔢 LAST4 #SERVICE
             masked_num = format_phone_number(full_num)
+            # Pilih emoji sesuai service
+            _svc_emoji_map = {
+                "#WS": "💬", "#TG": "✈️", "#G": "🔍", "#FB": "👥",
+                "#IG": "📸", "#TT": "🎵", "#GR": "🚗", "#GJ": "🛵",
+                "#SP": "🛒", "#TP": "🛍️",
+            }
+            _svc_icon = _svc_emoji_map.get(service_name, "💬")
             msg = (
-                f"🔔 <b>OTP BARU DITERIMA!</b>\n\n"
-                f"{flag} <b>#{region_code}</b>  📱 <code>+{dial_code}</code>  🏷️ <code>{last4}</code>  {service_name}\n\n"
-                f"🔒 📋  <code>{otp}</code>"
+                f"{flag} <b>#{region_code}</b>  {_svc_icon} <code>+{dial_code}</code>  🔢 <code>{last4}</code>  <b>{service_name}</b>"
             )
 
-            # Tombol NUMBER & CHANNEL (Garage-style) — link ke grup
+            # Tombol Garage-style: GET OTP (copy) + NUMBER + CHANNEL
             _GROUP_LINK = "https://t.me/matttttcha"
-            _otp_buttons = [[
-                {"text": "📱 NUMBER ↗", "url": _GROUP_LINK},
-                {"text": "🔔 CHANNEL ↗", "url": _GROUP_LINK},
-            ]]
 
             for gid in send_targets:
                 try:
-                    _kb = {"inline_keyboard": [[
-                        {"text": "📱 NUMBER ↗", "url": _GROUP_LINK},
-                        {"text": "🔔 CHANNEL ↗", "url": _GROUP_LINK},
-                    ]]}
+                    _kb = {"inline_keyboard": [
+                        [{"text": f"⚡ {otp} ⚡", "copy_text": {"text": otp}}],
+                        [
+                            {"text": "📱 NUMBER ↗", "url": _GROUP_LINK},
+                            {"text": "📢 CHANNEL ↗", "url": _GROUP_LINK},
+                        ],
+                    ]}
                     import requests as _req
                     _r = _req.post(
                         f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
