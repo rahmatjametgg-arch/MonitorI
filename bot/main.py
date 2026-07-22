@@ -4667,9 +4667,13 @@ def login(acc, _retry=0):
         return False
 
     # ── Jika sudah di /portal, session masih aktif — skip re-login ──
+    # Kirim tanpa X-Requested-With (bukan AJAX) agar Laravel balik HTML biasa.
+    # httpx tidak support None sebagai nilai header — build dict eksplisit.
     try:
+        _portal_hdr = {k: v for k, v in dict(session.headers).items()
+                       if k.lower() != "x-requested-with"}
         r_chk = session.get(f"{_IVAS_ORIGIN}/portal", timeout=15,
-                            headers={"X-Requested-With": None})
+                            headers=_portal_hdr)
         if r_chk.status_code == 200 and "/login" not in str(r_chk.url):
             _log("LOGIN", f"Sudah login [{email}] — skip", Fore.GREEN)
             tok = _csrf_from_html(r_chk.text)
@@ -4684,10 +4688,12 @@ def login(acc, _retry=0):
     # ── GET halaman login — WAJIB tanpa X-Requested-With ──
     # Jika header XHR dikirim ke GET /login, Laravel menganggapnya AJAX
     # dan mengembalikan JSON / response berbeda tanpa form HTML + CSRF token.
+    # httpx tidak support None sebagai nilai header — build dict eksplisit.
     try:
-        r = session.get(LOGIN_URL, timeout=20,
-                        headers={"X-Requested-With": None,
-                                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"})
+        _login_hdr = {k: v for k, v in dict(session.headers).items()
+                      if k.lower() != "x-requested-with"}
+        _login_hdr["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        r = session.get(LOGIN_URL, timeout=20, headers=_login_hdr)
     except Exception as e:
         _log("LOGIN", f"GET /login error [{email}]: {e}", Fore.RED)
         return False
@@ -4854,6 +4860,15 @@ def get_ranges(acc, _retry=0):
     if is_worker_blocked(resp=r) and _retry < len(WORKER_POOL) - 1:
         mark_worker_limited(worker_before)
         return get_ranges(acc, _retry=_retry + 1)
+    # IVAS 429 — tunggu lalu retry (bukan rotasi worker)
+    if r.status_code == 429:
+        wait = min(30 * (2 ** _retry), 180)
+        email = acc.get("email", "")
+        _log("MYRANGE", f"IVAS 429 [{email}] get_ranges — tunggu {wait}s", Fore.YELLOW)
+        time.sleep(wait)
+        if _retry < 3:
+            return get_ranges(acc, _retry=_retry + 1)
+        return []
     if _is_login_page(r):
         _invalidate_session(acc, f"SESSION_EXPIRED: get_ranges ({r.url})")
     soup = BeautifulSoup(r.text, "html.parser")
@@ -4888,6 +4903,15 @@ def get_numbers(acc, rng, _retry=0):
     if is_worker_blocked(resp=r) and _retry < len(WORKER_POOL) - 1:
         mark_worker_limited(worker_before)
         return get_numbers(acc, rng, _retry=_retry + 1)
+    # IVAS 429 — tunggu lalu retry
+    if r.status_code == 429:
+        wait = min(30 * (2 ** _retry), 180)
+        email = acc.get("email", "")
+        _log("MYRANGE", f"IVAS 429 [{email}] get_numbers — tunggu {wait}s", Fore.YELLOW)
+        time.sleep(wait)
+        if _retry < 3:
+            return get_numbers(acc, rng, _retry=_retry + 1)
+        return []
     if _is_login_page(r):
         _invalidate_session(acc, f"SESSION_EXPIRED: get_numbers ({r.url})")
     soup = BeautifulSoup(r.text, "html.parser")
@@ -4910,6 +4934,15 @@ def get_sms(acc, rng, number, _retry=0):
     if is_worker_blocked(resp=r) and _retry < len(WORKER_POOL) - 1:
         mark_worker_limited(worker_before)
         return get_sms(acc, rng, number, _retry=_retry + 1)
+    # IVAS 429 — tunggu lalu retry
+    if r.status_code == 429:
+        wait = min(30 * (2 ** _retry), 180)
+        email = acc.get("email", "")
+        _log("MYRANGE", f"IVAS 429 [{email}] get_sms — tunggu {wait}s", Fore.YELLOW)
+        time.sleep(wait)
+        if _retry < 3:
+            return get_sms(acc, rng, number, _retry=_retry + 1)
+        return []
     if _is_login_page(r):
         _invalidate_session(acc, f"SESSION_EXPIRED: get_sms ({r.url})")
     soup = BeautifulSoup(r.text, "html.parser")  
