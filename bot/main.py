@@ -1532,8 +1532,7 @@ def handle_pkg_info_cb(chat_id, user_id, tier_key, cb_id, msg_id):
         f"📧 Max Email   : <b>{t['max_email']} akun</b> IVAS\n"
         f"🔄 Reset Token : 00:00 WIB\n\n"
         f"✅ <b>Semua fitur aktif:</b>\n"
-        f"  • /addcookie — kelola cookie IVAS\n"
-        f"  • /addemail — tambah akun IVAS\n"
+        f"  • /addemail — tambah akun IVAS (email + password)\n"
         f"  • /addnum — tambah nomor test\n"
         f"  • /delnumall — kembalikan semua nomor\n"
         f"  • /myrange — cek range aktif\n"
@@ -2055,7 +2054,6 @@ def handle_start(user_id, chat_id):
             "/deltoken — hapus paket user\n"
             "/resettoken — reset token user manual\n"
             "/listtoken — list paket aktif\n"
-            "/setcookie\n"
             "/addakun\n"
             "/delakun\n"
             "/listakun\n"
@@ -2064,11 +2062,9 @@ def handle_start(user_id, chat_id):
             f"🎫 <b>Token:</b> {tok}\n\n"
             "🛠️ <b>FITUR</b>\n"
             "<blockquote>"
-            "/addcookie\n"
             "/addemail email password\n"
             "/listemail\n"
             "/delemail\n"
-            "/delcookie email\n"
             "/addnum\n"
             "/delnumall\n"
             "/myrange\n"
@@ -2098,11 +2094,9 @@ def handle_start(user_id, chat_id):
             f"📧 <b>Max Email:</b> {email_limit} akun\n\n"
             "🛠️ <b>FITUR</b> <i>(1 fitur = 1 token)</i>\n"
             "<blockquote>"
-            "/addcookie\n"
             "/addemail email password\n"
             "/listemail\n"
             "/delemail\n"
-            "/delcookie email\n"
             "/addnum\n"
             "/delnumall\n"
             "/myrange\n"
@@ -3758,7 +3752,7 @@ def _ensure_login_inner(acc):
                     f"📧 Email: <code>{email}</code>\n"
                     f"❌ Cookie expired & login password gagal.\n\n"
                     f"Bot akan otomatis retry setiap 10 menit.\n"
-                    f"Perbarui cookie dengan /setcookie atau /addcookie."
+                    f"Pastikan password IVAS di /addemail masih benar."
                 ),
                 "parse_mode": "HTML"
             },
@@ -4702,13 +4696,9 @@ def login(acc, _retry=0):
         mark_worker_limited(worker_before)
         return login(acc, _retry=_retry + 1)
 
-    # IVAS 429 — exponential backoff, bukan rotasi worker
+    # IVAS 429 — skip, retry di cycle berikutnya
     if r.status_code == 429:
-        wait = min(20 * (2 ** _retry), 120)
-        _log("LOGIN", f"IVAS 429 [{email}] — tunggu {wait}s lalu retry", Fore.YELLOW)
-        time.sleep(wait)
-        if _retry < 4:
-            return login(acc, _retry=_retry + 1)
+        _log("LOGIN", f"IVAS 429 [{email}] — skip cycle, retry otomatis", Fore.YELLOW)
         return False
 
     # Sudah redirect ke /portal → session masih hidup
@@ -4722,9 +4712,7 @@ def login(acc, _retry=0):
     token = _csrf_from_html(r.text)
     if not token:
         _log("LOGIN", f"CSRF TIDAK DITEMUKAN [{email}] (status={r.status_code}, url={r.url})", Fore.RED)
-        _log("LOGIN", f"HTML[:200]={r.text[:200]!r}", Fore.RED)
         if _retry < 2:
-            time.sleep(10)
             return login(acc, _retry=_retry + 1)
         return False
 
@@ -4750,11 +4738,7 @@ def login(acc, _retry=0):
         return login(acc, _retry=_retry + 1)
 
     if r2.status_code == 429:
-        wait = min(20 * (2 ** _retry), 120)
-        _log("LOGIN", f"IVAS 429 POST [{email}] — tunggu {wait}s lalu retry", Fore.YELLOW)
-        time.sleep(wait)
-        if _retry < 4:
-            return login(acc, _retry=_retry + 1)
+        _log("LOGIN", f"IVAS 429 POST [{email}] — skip cycle, retry otomatis", Fore.YELLOW)
         return False
 
     _log("LOGIN", f"Response URL: {r2.url}", Fore.CYAN)
@@ -4860,14 +4844,10 @@ def get_ranges(acc, _retry=0):
     if is_worker_blocked(resp=r) and _retry < len(WORKER_POOL) - 1:
         mark_worker_limited(worker_before)
         return get_ranges(acc, _retry=_retry + 1)
-    # IVAS 429 — tunggu lalu retry (bukan rotasi worker)
+    # IVAS 429 — skip cycle, jangan block thread
     if r.status_code == 429:
-        wait = min(30 * (2 ** _retry), 180)
         email = acc.get("email", "")
-        _log("MYRANGE", f"IVAS 429 [{email}] get_ranges — tunggu {wait}s", Fore.YELLOW)
-        time.sleep(wait)
-        if _retry < 3:
-            return get_ranges(acc, _retry=_retry + 1)
+        _log("MYRANGE", f"IVAS 429 [{email}] get_ranges — skip cycle, retry otomatis", Fore.YELLOW)
         return []
     if _is_login_page(r):
         _invalidate_session(acc, f"SESSION_EXPIRED: get_ranges ({r.url})")
@@ -5183,7 +5163,7 @@ def listen_command():
                     elif text.startswith("/listakun"): 
                         if owner: list_accounts(chat_id, user_id)
                         else: send_msg(chat_id, "  Khusus OWNER")
-                    elif text.startswith("/addcookie"):
+                    elif text.startswith("/addcookie_disabled"):
                         if use_token(user_id):
                             add_cookie_premium(text, chat_id, user_id)
                             send_activity_log(user_id, udisp, "/addcookie")
@@ -5313,7 +5293,7 @@ def listen_command():
                     elif text.startswith("/delakun"): 
                         if owner: command_delakun(chat_id, user_id) 
                         else: send_msg(chat_id, "❌ Khusus OWNER")
-                    elif text.startswith("/setcookie"): 
+                    elif text.startswith("/setcookie_disabled"):
                         if owner: cmd_setcookie(chat_id)
                         else: send_msg(chat_id, "❌ Khusus OWNER")
                     elif text.startswith("/statsms"): 
