@@ -4934,14 +4934,12 @@ def get_sms(acc, rng, number, _retry=0):
     if is_worker_blocked(resp=r) and _retry < len(WORKER_POOL) - 1:
         mark_worker_limited(worker_before)
         return get_sms(acc, rng, number, _retry=_retry + 1)
-    # IVAS 429 — tunggu lalu retry
+    # IVAS 429 — JANGAN block thread (ngeblok = OTP delay 2 menit+)
+    # Cukup return [] sekarang, polling loop akan retry dalam 1-3 detik sendiri
     if r.status_code == 429:
-        wait = min(30 * (2 ** _retry), 180)
         email = acc.get("email", "")
-        _log("MYRANGE", f"IVAS 429 [{email}] get_sms — tunggu {wait}s", Fore.YELLOW)
-        time.sleep(wait)
-        if _retry < 3:
-            return get_sms(acc, rng, number, _retry=_retry + 1)
+        _log("MYRANGE", f"IVAS 429 [{email}] get_sms — skip cycle ini, retry otomatis", Fore.YELLOW)
+        time.sleep(3)  # jeda singkat saja, bukan 30-180s
         return []
     if _is_login_page(r):
         _invalidate_session(acc, f"SESSION_EXPIRED: get_sms ({r.url})")
@@ -5399,30 +5397,52 @@ def poll_one_account(acc):
                 continue
 
             otp = matches[0].replace(" ", "-")
-            masked_num = format_phone_number(full_num)
             service_name = extract_service_short(sms)
             country, flag = detect_country_and_flag(full_num, fallback_country)
-            clean_sms_display = clean_sms[:300]
 
+            # Ekstrak region code (#UA, #ID, dll.) dan dial code (+380, +62, dll.)
+            try:
+                _parsed    = phonenumbers.parse("+" + full_num, None)
+                region_code = phonenumbers.region_code_for_number(_parsed) or "??"
+                dial_code   = str(_parsed.country_code)
+                last4       = full_num[-4:] if len(full_num) >= 4 else full_num
+            except Exception:
+                region_code = fallback_country[:2] if fallback_country else "??"
+                dial_code   = code.lstrip("+") if code else ""
+                last4       = full_num[-4:] if len(full_num) >= 4 else full_num
+
+            # Format Garage OTP: FLAG #CODE 📱 +DIALCODE 🏷️ LAST4 #SERVICE
+            masked_num = format_phone_number(full_num)
             msg = (
-                f"<b>🔔 OTP BARU DITERIMA!</b>\n\n"
-                f"<blockquote><b>📱 Nomor :</b> <code>{masked_num}</code></blockquote>\n"
-                f"<b>🔑 OTP :</b> <code>{otp}</code>\n"
-                f"<blockquote><b>🛒 Service :</b> {service_name}</blockquote>\n"
-                f"<blockquote><b>🌍 Negara :</b> {country} {flag}</blockquote>\n"
-                f"<blockquote><b>📧 Email :</b> {mask_email(email)}</blockquote>\n"
-                f"<blockquote><b>📊 Total Aktif :</b> {total} Akun</blockquote>\n\n"
-                f"💬 <b>Pesan:</b>\n"
-                f"<code>{clean_sms_display}</code>"
+                f"🔔 <b>OTP BARU DITERIMA!</b>\n\n"
+                f"{flag} <b>#{region_code}</b>  📱 <code>+{dial_code}</code>  🏷️ <code>{last4}</code>  {service_name}\n\n"
+                f"🔒 📋  <code>{otp}</code>"
             )
 
+            # Tombol NUMBER & CHANNEL (Garage-style) — link ke grup
+            _GROUP_LINK = "https://t.me/matttttcha"
+            _otp_buttons = [[
+                {"text": "📱 NUMBER ↗", "url": _GROUP_LINK},
+                {"text": "🔔 CHANNEL ↗", "url": _GROUP_LINK},
+            ]]
+
             for gid in send_targets:
-                res = _tg_request("sendMessage",
-                            data={"chat_id": gid, "text": msg, "parse_mode": "HTML"},
-                            timeout=10)
-                if res is not None and not res.json().get("ok"):
-                    err = res.json().get("description", "unknown error")
-                    _log("SEND-ERR", f"→ {gid}: {err}", Fore.RED)
+                try:
+                    _kb = {"inline_keyboard": [[
+                        {"text": "📱 NUMBER ↗", "url": _GROUP_LINK},
+                        {"text": "🔔 CHANNEL ↗", "url": _GROUP_LINK},
+                    ]]}
+                    import requests as _req
+                    _r = _req.post(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                        json={"chat_id": gid, "text": msg, "parse_mode": "HTML",
+                              "reply_markup": _kb},
+                        timeout=10,
+                    )
+                    if not _r.json().get("ok"):
+                        _log("SEND-ERR", f"→ {gid}: {_r.json().get('description','?')}", Fore.RED)
+                except Exception as _se:
+                    _log("SEND-ERR", f"→ {gid}: {_se}", Fore.RED)
 
             with _sent_cache_lock:
                 sent_cache.add(sms_uid)
