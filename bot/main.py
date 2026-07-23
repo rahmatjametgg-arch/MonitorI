@@ -289,7 +289,7 @@ DetectorFactory.seed = 0
 init(autoreset=True)
 accounts_lock = threading.Lock()
 LOGIN_COOLDOWN = 300  # 5 menit
-SESSION_RETRY_INTERVAL = 600  # retry setiap 10 menit kalau session gagal
+SESSION_RETRY_INTERVAL = 60   # retry setiap 1 menit kalau session gagal
 
 # ================= TELEGRAM SESSION (persistent + retry) =================
 _TG_SESSION = requests.Session()
@@ -336,7 +336,7 @@ _session_retry_time  = {}   # email -> timestamp terakhir retry
 _session_recovered   = {}   # email -> bool sudah notif recover
 
 # ================= AUTO COOKIE REFRESHER =================
-COOKIE_KEEPALIVE_INTERVAL = 600   # keepalive tiap 10 menit (sebelum session sempat expire)
+COOKIE_KEEPALIVE_INTERVAL = 120   # keepalive tiap 2 menit (refresh sebelum expire)
 COOKIE_NOTIF_COOLDOWN     = 3600  # notif ulang maks 1x per jam per akun
 _last_cookie_refresh      = {}    # email -> timestamp terakhir keepalive
 _last_cookie_notif        = {}    # email -> timestamp terakhir notif dikirim
@@ -4717,14 +4717,21 @@ def login(acc, _retry=0):
         return False
 
     acc["csrf_token"] = token
+
+    # Pakai URL aktual setelah redirect (bisa jadi worker URL, bukan LOGIN_URL asal)
+    actual_login_url = str(r.url)
+    actual_origin    = "/".join(actual_login_url.split("/")[:3])  # https://host
+
     session.headers.update({
         "X-CSRF-TOKEN":     token,
         "X-Requested-With": "XMLHttpRequest",
+        "Origin":           actual_origin,
+        "Referer":          actual_login_url,
     })
 
-    # POST login
+    # POST login ke URL yang sama dengan tempat form di-serve (setelah redirect)
     try:
-        r2 = session.post(LOGIN_URL, data={
+        r2 = session.post(actual_login_url, data={
             "_token":   token,
             "email":    email,
             "password": password,
