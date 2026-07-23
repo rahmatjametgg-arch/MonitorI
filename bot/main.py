@@ -4720,10 +4720,26 @@ def login(acc, _retry=0):
 
     token = _csrf_from_html(r.text)
     if not token:
-        _log("LOGIN", f"CSRF TIDAK DITEMUKAN [{email}] (status={r.status_code}, url={r.url})", Fore.RED)
-        if _retry < 2:
-            return login(acc, _retry=_retry + 1)
-        return False
+        _log("LOGIN", f"CSRF TIDAK DITEMUKAN [{email}] di {r.url} — coba worker lain", Fore.YELLOW)
+        # Worker aktif diblok Cloudflare — coba semua worker lain sampai dapat form login
+        for alt_worker in WORKER_POOL:
+            if alt_worker == _IVAS_ORIGIN:
+                continue
+            try:
+                _alt_hdr = {k: v for k, v in dict(session.headers).items()
+                            if k.lower() != "x-requested-with"}
+                _alt_hdr["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+                r_alt = session.get(f"{alt_worker}/login", timeout=20, headers=_alt_hdr)
+                token = _csrf_from_html(r_alt.text)
+                if token:
+                    _log("LOGIN", f"CSRF ditemukan di worker {alt_worker} [{email}]", Fore.GREEN)
+                    r = r_alt  # pakai response dari worker yang berhasil
+                    break
+            except Exception:
+                continue
+        if not token:
+            _log("LOGIN", f"Semua worker CSRF gagal [{email}]", Fore.RED)
+            return False
 
     acc["csrf_token"] = token
 
@@ -5498,12 +5514,9 @@ def _notify_cookie_expired(email, uid):
     msg = (
         f"⚠️ <b>COOKIE EXPIRED — AUTO REFRESH GAGAL</b>\n\n"
         f"📧 Email: <code>{email}</code>\n"
-        f"❌ Cookie sudah expired dan tidak bisa auto-login.\n\n"
-        f"<blockquote>Silakan perbarui cookie dengan:\n"
-        f"• Owner  : /setcookie\n"
-        f"• User   : /addcookie\n\n"
-        f"💡 Ambil cookie fresh dari browser:\n"
-        f"DevTools → Application → Cookies → copy semua</blockquote>"
+        f"❌ Cookie expired, sedang otomatis coba re-login...\n\n"
+        f"<blockquote>Jika gagal terus, pastikan password IVAS masih benar.\n"
+        f"Gunakan /delemail lalu /addemail ulang dengan password yang benar.</blockquote>"
     )
     # Kirim notif HANYA ke pemilik akun (bukan bocor ke owner kalau akun milik user)
     target = uid if uid else OWNER_ID
