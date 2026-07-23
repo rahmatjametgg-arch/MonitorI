@@ -68,11 +68,20 @@ def get_active_worker():
 def _common_headers():
     origin = _IVAS_ORIGIN
     return {
-        "User-Agent":       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "X-Requested-With": "XMLHttpRequest",
-        "Origin":           origin,
-        "Referer":          f"{origin}/",
-        "X-Forwarded-Host": _IVAS_HOST,
+        "User-Agent":          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+        "Accept":              "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language":     "en-US,en;q=0.9",
+        "Accept-Encoding":     "gzip, deflate, br, zstd",
+        "sec-ch-ua":           '"Google Chrome";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
+        "sec-ch-ua-mobile":    "?0",
+        "sec-ch-ua-platform":  '"Windows"',
+        "Sec-Fetch-Site":      "same-origin",
+        "Sec-Fetch-Mode":      "navigate",
+        "Sec-Fetch-Dest":      "document",
+        "X-Requested-With":    "XMLHttpRequest",
+        "Origin":              origin,
+        "Referer":             f"{origin}/",
+        "X-Forwarded-Host":    _IVAS_HOST,
     }
 
 def _apply_worker_globals(new_base):
@@ -5616,11 +5625,8 @@ def auto_cookie_refresher():
                                 warn_msg = (
                                     f"⚠️ <b>SESSION WARNING</b>\n\n"
                                     f"📧 Email: <code>{email}</code>\n"
-                                    f"Session tidak merespons. Kemungkinan cookie akan segera expired.\n\n"
-                                    f"<blockquote>Bot sedang otomatis retry...\n"
-                                    f"Jika berlanjut, segera perbarui cookie dengan:\n"
-                                    f"• Owner: /setcookie\n"
-                                    f"• User: /addcookie</blockquote>"
+                                    f"Session tidak merespons, sedang otomatis retry login...\n\n"
+                                    f"<blockquote>Jika gagal terus, cek password IVAS masih benar via /addemail</blockquote>"
                                 )
                                 # Kirim HANYA ke pemilik akun (tidak bocor ke owner jika akun milik user)
                                 warn_target = uid if uid else OWNER_ID
