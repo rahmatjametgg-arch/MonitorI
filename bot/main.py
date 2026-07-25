@@ -3524,6 +3524,10 @@ def process_cookie_input(chat_id, user_id, text):
                     _session_fail_time.pop(email, None)
                     _session_retry_time.pop(email, None)
                     _session_recovered.pop(email, None)
+                    # Reset keepalive warn counter — cegah false "COOKIE EXPIRED" setelah setcookie fresh
+                    _keepalive_warn_count[email] = 0
+                    # Reset notif cooldown — agar notif bisa kirim lagi jika cookie baru ini juga expired
+                    _last_cookie_notif.pop(email, None)
                     # Hapus ranges cache — paksa fetch fresh saat poll berikutnya
                     _ranges_cache.pop(email, None)
                     delete_and_send(chat_id, proc_id,
@@ -3707,6 +3711,10 @@ def process_addcookie_input(chat_id, user_id, text):
             _session_fail_time.pop(email, None)
             _session_retry_time.pop(email, None)
             _session_recovered.pop(email, None)
+            # Reset keepalive warn counter — cegah false "COOKIE EXPIRED" setelah addcookie fresh
+            _keepalive_warn_count[email] = 0
+            # Reset notif cooldown — agar notif bisa kirim lagi jika cookie baru ini juga expired
+            _last_cookie_notif.pop(email, None)
             # Hapus ranges cache — paksa fetch fresh saat poll berikutnya
             _ranges_cache.pop(email, None)
             # Paksa run_bot sync segera agar thread worker baru langsung spawn
@@ -5395,14 +5403,12 @@ def listen_command():
                                 send_msg(chat_id, "⚠️ ApplicationEmoji belum di-load. Restart bot dulu.")
                             else:
                                 mapped = {v: k for k, v in _APP_EMOJI.items() if k != "__all__"}
-                                lines = ["📦 <b>ApplicationEmoji Pack</b>
-<blockquote>"]
+                                lines = ["📦 <b>ApplicationEmoji Pack</b>\n<blockquote>"]
                                 for item in all_e:
                                     svc = mapped.get(item["cid"], "—")
                                     lines.append(f"#{item['idx']+1} {item['emoji']}  <code>{item['cid']}</code>  → {svc}")
                                 lines.append("</blockquote>")
-                                send_msg(chat_id, "
-".join(lines))
+                                send_msg(chat_id, "\n".join(lines))
                         else: send_msg(chat_id, "❌ Khusus OWNER")
                 except Exception as ex: 
                     print(f"Error handling message: {ex}")
