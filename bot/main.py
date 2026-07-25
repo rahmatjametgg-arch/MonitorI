@@ -125,9 +125,9 @@ def make_session(cookies: dict, timeout=30):
         "User-Agent":       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                             "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "X-Requested-With": "XMLHttpRequest",
-        "Origin":           base,
-        "Referer":          f"{base}/",
-        "X-Forwarded-Host": host,
+        # Gunakan origin/referer asli IVAS agar tidak ditolak karena header worker
+        "Origin":           "https://ivasms.com",
+        "Referer":          "https://ivasms.com/",
     }
     s = httpx.Client(
         follow_redirects=True,
@@ -556,6 +556,14 @@ def keepalive_worker(accounts):
             try:
                 base = get_base()
                 r    = acc["session"].get(f"{base}/portal", timeout=15)
+                _log("DEBUG", f"STATUS : {r.status_code}", Fore.MAGENTA)
+                _log("DEBUG", f"URL    : {r.url}", Fore.MAGENTA)
+                if r.history:
+                    for h in r.history:
+                        _log("DEBUG", f"REDIRECT {h.status_code} -> {h.headers.get('Location')}", Fore.MAGENTA)
+                _log("DEBUG", f"SERVER : {r.headers.get('Server')}", Fore.MAGENTA)
+                if r.status_code != 200 or "/login" in str(r.url):
+                    _log("DEBUG", r.text[:500], Fore.MAGENTA)
                 if r.status_code == 200 and "/login" not in str(r.url):
                     _log("KA-OK", f"akun #{idx} session aktif", Fore.GREEN)
                     # Hapus CSRF cache agar di-refresh saat poll berikutnya
