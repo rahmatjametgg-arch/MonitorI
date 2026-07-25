@@ -1,7 +1,41 @@
-{
-  "rahmatid27@gmail.com": {
-    "_fbp": "fb.1.1784167264549.409768882230655008",
-    "XSRF-TOKEN": "eyJpdiI6IjBjdUY1YmZPM1hBTE5MSVdoRUFZK0E9PSIsInZhbHVlIjoiMHpaUjNVb1I5b21zNGFPbGRNT25YanBEbGl5MDRrdEdwTkJpck95M3FobUV1QzJrSEdqVkp6VUg0TStVMXErdmtxTEczSDBlN0s0cE4relN0eFJsMEhiL1BxUmY0dWQ4SG96SFpNQkNTN2R1VUp1Y2xMZFp5dlBLY25VdGI5dHIiLCJtYWMiOiIwZTUyYzBhNjMwZDAwNWFiYzE2NzM5MDZlOTViYjQwOGM1Y2RkZDk3MDljMmJlMTE5YjZiMjQ1M2E0OGZkNDNlIiwidGFnIjoiIn0%3D",
-    "ivas_sms_session": "eyJpdiI6IjJIQWxSdEtnVXFFVllsUzZ0Y3k1cVE9PSIsInZhbHVlIjoiQ2J3MEpxMjVJaUgrZmROREJhS040Vm00djJHOG82QklxUDRWMlJMdFVNNVdvUHltOWdmdmhQRHRORWpSRVFaSlRuTWxTMVNXMXJwRDhFdTRjS3RITWZ1L3lOcEl6N0N6Z0NpcW9kbGFSalFuOWFOV2xkWGZFZXMyTFVObTdleHMiLCJtYWMiOiJkNTVmZDBmYzRjNmE2MWM0MjQ5Y2IwOTBjZjhiZjczMDY5OTgwZWUxOTVlYTI3NDE1NTMyOTYxZTNiMTUyMzQ0IiwidGFnIjoiIn0%3D"
-  }
-}
+[
+    {
+        "domain": ".ivasms.com",
+        "expirationDate": 1792794526,
+        "hostOnly": false,
+        "httpOnly": false,
+        "name": "_fbp",
+        "path": "/",
+        "sameSite": "lax",
+        "secure": false,
+        "session": false,
+        "storeId": null,
+        "value": "fb.1.1784167264549.409768882230655008"
+    },
+    {
+        "domain": "www.ivasms.com",
+        "expirationDate": 1785025727.090424,
+        "hostOnly": true,
+        "httpOnly": false,
+        "name": "XSRF-TOKEN",
+        "path": "/",
+        "sameSite": "lax",
+        "secure": false,
+        "session": false,
+        "storeId": null,
+        "value": "eyJpdiI6IlFMWnFKOTBDNU9SM0loUHJxL0V6VkE9PSIsInZhbHVlIjoiVFAxZ3pOcnlIZUJQbHRKQmVOcW5ueGlOMTFlM3ZKQUE0TGJKSEI3WEU2b0JrSU15aDY1Sk5DVG82WUlMNW5TbWxDS3RqSk5yenRHanl0WEdndkJoUFAyL3pzTG12M09jbUhsT05oSjVoY29FeXFMU2Q2Q0RXUHY4QUtOSmNxRW4iLCJtYWMiOiJlYzE1ZWFlYWZhYWQ1YjY4NDQ3Y2JhNmZkNDZiZTU4YjJiNzcxZTUyMTM5MDZhMmY1NzA3ODExYzJhNzJlY2VhIiwidGFnIjoiIn0%3D"
+    },
+    {
+        "domain": "www.ivasms.com",
+        "expirationDate": 1785025727.090688,
+        "hostOnly": true,
+        "httpOnly": true,
+        "name": "ivas_sms_session",
+        "path": "/",
+        "sameSite": "lax",
+        "secure": false,
+        "session": false,
+        "storeId": null,
+        "value": "eyJpdiI6Ik9zaU5Bb3p4b052Qzh2WHJEUkxQb3c9PSIsInZhbHVlIjoiSzFaUjRsUkRkaU42d05ibEM0a242MEo4WXg3T2VDRWc2bnVnUmpsWVdidG9DemJhR3ZKcGZsT0Z4eTF0aThsb1RPRUhXeG9rc0wvU0tqRUVjSG9kcHFNbHYxb0hMNUZGWEQ3RmhlZTdCQkMwZExnZGtPSTFYT0pTTndrWU0rNjgiLCJtYWMiOiIwMDMzYTBmYzkxNWYxYWFmNjgzZTYzNDlmNWViMzYyNTdiZWNjMWZkMmFjMGE1YjBkNGEzNGVmOGM5N2M1ZWZiIiwidGFnIjoiIn0%3D"
+    }
+]
