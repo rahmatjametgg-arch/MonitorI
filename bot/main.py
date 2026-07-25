@@ -108,11 +108,17 @@ def load_cookies():
             data = json.load(f)
         if not data:
             return []
-        # Semua value adalah dict → format multi-akun {email: {cookies}}
-        if all(isinstance(v, dict) for v in data.values()):
+
+        if isinstance(data, list):
+            if all(isinstance(x, dict) and "name" in x and "value" in x for x in data):
+                return [{x["name"]: x["value"] for x in data}]
+            return data
+
+        if isinstance(data, dict) and all(isinstance(v, dict) for v in data.values()):
             return list(data.values())
-        # Flat dict → single akun
-        return [data]
+
+        if isinstance(data, dict):
+            return [data]
     except Exception as e:
         _log("COOKIE", f"error load {COOKIE_FILE}: {e}", Fore.RED)
         return []
@@ -125,9 +131,9 @@ def make_session(cookies: dict, timeout=30):
         "User-Agent":       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                             "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "X-Requested-With": "XMLHttpRequest",
-        "Origin":           base,
-        "Referer":          f"{base}/",
-        "X-Forwarded-Host": host,
+        "Origin":           "https://ivasms.com",
+        "Referer":          "https://ivasms.com/",
+        
     }
     s = httpx.Client(
         follow_redirects=True,
@@ -191,7 +197,7 @@ def _recv_headers(base):
         "X-Requested-With": "XMLHttpRequest",
         "Content-Type":     "application/x-www-form-urlencoded; charset=UTF-8",
         "Referer":          f"{base}/portal/sms/received",
-        "Origin":           base,
+        "Origin":           "https://ivasms.com",
     }
 
 def get_ranges(acc, _retry=0):
