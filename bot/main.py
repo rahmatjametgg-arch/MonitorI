@@ -68,20 +68,11 @@ def get_active_worker():
 def _common_headers():
     origin = _IVAS_ORIGIN
     return {
-        "User-Agent":          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-        "Accept":              "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "Accept-Language":     "en-US,en;q=0.9",
-        "Accept-Encoding":     "gzip, deflate, br, zstd",
-        "sec-ch-ua":           '"Google Chrome";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
-        "sec-ch-ua-mobile":    "?0",
-        "sec-ch-ua-platform":  '"Windows"',
-        "Sec-Fetch-Site":      "same-origin",
-        "Sec-Fetch-Mode":      "navigate",
-        "Sec-Fetch-Dest":      "document",
-        "X-Requested-With":    "XMLHttpRequest",
-        "Origin":              origin,
-        "Referer":             f"{origin}/",
-        "X-Forwarded-Host":    _IVAS_HOST,
+        "User-Agent":       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "X-Requested-With": "XMLHttpRequest",
+        "Origin":           origin,
+        "Referer":          f"{origin}/",
+        "X-Forwarded-Host": _IVAS_HOST,
     }
 
 def _apply_worker_globals(new_base):
@@ -298,7 +289,7 @@ DetectorFactory.seed = 0
 init(autoreset=True)
 accounts_lock = threading.Lock()
 LOGIN_COOLDOWN = 300  # 5 menit
-SESSION_RETRY_INTERVAL = 60   # retry setiap 1 menit kalau session gagal
+SESSION_RETRY_INTERVAL = 600  # retry setiap 10 menit kalau session gagal
 
 # ================= TELEGRAM SESSION (persistent + retry) =================
 _TG_SESSION = requests.Session()
@@ -345,7 +336,7 @@ _session_retry_time  = {}   # email -> timestamp terakhir retry
 _session_recovered   = {}   # email -> bool sudah notif recover
 
 # ================= AUTO COOKIE REFRESHER =================
-COOKIE_KEEPALIVE_INTERVAL = 120   # keepalive tiap 2 menit (refresh sebelum expire)
+COOKIE_KEEPALIVE_INTERVAL = 600   # keepalive tiap 10 menit (sebelum session sempat expire)
 COOKIE_NOTIF_COOLDOWN     = 3600  # notif ulang maks 1x per jam per akun
 _last_cookie_refresh      = {}    # email -> timestamp terakhir keepalive
 _last_cookie_notif        = {}    # email -> timestamp terakhir notif dikirim
@@ -382,6 +373,75 @@ _last_cache_save  = 0.0
 _bot_state = {"email_to_uid": {}, "total_accounts": 0}
 # Flag untuk memaksa run_bot sync segera (set True setelah addcookie/setcookie berhasil)
 _force_bot_sync   = False
+
+# ================= CUSTOM EMOJI (ApplicationEmoji pack) =================
+# Dict service_code -> custom_emoji_id dari pack t.me/addemoji/ApplicationEmoji
+# Diisi otomatis saat startup via _load_app_emoji()
+_APP_EMOJI: dict = {}   # e.g. {"#WS": "5373026167722876724", "#TG": "...", ...}
+
+# Mapping: emoji karakter standar -> kode service (untuk auto-detect saat fetch pack)
+_EMOJI_TO_SVC = {
+    "💬": "#WS",   # WhatsApp (speech bubble)
+    "🟢": "#WS",   # WhatsApp (green circle)
+    "📱": "#WS",   # fallback WA
+    "✈️": "#TG",   # Telegram paper plane
+    "🔵": "#TG",   # Telegram blue
+    "🔍": "#G",    # Google search
+    "🌐": "#G",    # Google globe
+    "📘": "#FB",   # Facebook
+    "👥": "#FB",   # Facebook people
+    "📷": "#IG",   # Instagram camera
+    "📸": "#IG",   # Instagram
+    "🎵": "#TT",   # TikTok music
+    "🎶": "#TT",   # TikTok music alt
+    "🚗": "#GR",   # Grab car
+    "🟢": "#GJ",   # Gojek (override WA — urutan pertama menang)
+    "🛵": "#GJ",   # Gojek motor
+    "🟠": "#SP",   # Shopee orange
+    "🛒": "#SP",   # Shopee cart
+    "🛍️": "#TP",   # Tokopedia bag
+    "💚": "#TP",   # Tokopedia green
+}
+
+def _load_app_emoji():
+    """
+    Fetch sticker set ApplicationEmoji via Bot API dan petakan ke kode service.
+    Dipanggil sekali saat startup. Jika gagal, bot tetap jalan pakai emoji teks biasa.
+    """
+    global _APP_EMOJI
+    if not BOT_TOKEN:
+        return
+    try:
+        r = requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getStickerSet",
+            params={"name": "ApplicationEmoji"},
+            timeout=15,
+        )
+        d = r.json()
+        if not d.get("ok"):
+            _log("EMOJI", f"getStickerSet gagal: {d.get('description','?')}", Fore.YELLOW)
+            return
+
+        stickers = d["result"].get("stickers", [])
+        # Map: custom_emoji_id per service — ambil yang pertama match
+        assigned = set()
+        for s in stickers:
+            cid   = s.get("custom_emoji_id", "")
+            emoji = s.get("emoji", "")
+            svc   = _EMOJI_TO_SVC.get(emoji)
+            if svc and svc not in assigned and cid:
+                _APP_EMOJI[svc] = cid
+                assigned.add(svc)
+
+        # Simpan semua sticker ke list untuk /listappemoji
+        _APP_EMOJI["__all__"] = [
+            {"idx": i, "emoji": s.get("emoji",""), "cid": s.get("custom_emoji_id","")}
+            for i, s in enumerate(stickers)
+        ]
+        found = {k: v for k, v in _APP_EMOJI.items() if k != "__all__"}
+        _log("EMOJI", f"ApplicationEmoji loaded — {len(stickers)} sticker, {len(found)} mapped", Fore.GREEN)
+    except Exception as e:
+        _log("EMOJI", f"load gagal (lanjut tanpa custom emoji): {e}", Fore.YELLOW)
 
 # ================= ACCOUNT MANAGEMENT =================
 def load_accounts():
@@ -1541,7 +1601,8 @@ def handle_pkg_info_cb(chat_id, user_id, tier_key, cb_id, msg_id):
         f"📧 Max Email   : <b>{t['max_email']} akun</b> IVAS\n"
         f"🔄 Reset Token : 00:00 WIB\n\n"
         f"✅ <b>Semua fitur aktif:</b>\n"
-        f"  • /addemail — tambah akun IVAS (email + password)\n"
+        f"  • /addcookie — kelola cookie IVAS\n"
+        f"  • /addemail — tambah akun IVAS\n"
         f"  • /addnum — tambah nomor test\n"
         f"  • /delnumall — kembalikan semua nomor\n"
         f"  • /myrange — cek range aktif\n"
@@ -2063,6 +2124,7 @@ def handle_start(user_id, chat_id):
             "/deltoken — hapus paket user\n"
             "/resettoken — reset token user manual\n"
             "/listtoken — list paket aktif\n"
+            "/setcookie\n"
             "/addakun\n"
             "/delakun\n"
             "/listakun\n"
@@ -2071,9 +2133,11 @@ def handle_start(user_id, chat_id):
             f"🎫 <b>Token:</b> {tok}\n\n"
             "🛠️ <b>FITUR</b>\n"
             "<blockquote>"
+            "/addcookie\n"
             "/addemail email password\n"
             "/listemail\n"
             "/delemail\n"
+            "/delcookie email\n"
             "/addnum\n"
             "/delnumall\n"
             "/myrange\n"
@@ -2103,9 +2167,11 @@ def handle_start(user_id, chat_id):
             f"📧 <b>Max Email:</b> {email_limit} akun\n\n"
             "🛠️ <b>FITUR</b> <i>(1 fitur = 1 token)</i>\n"
             "<blockquote>"
+            "/addcookie\n"
             "/addemail email password\n"
             "/listemail\n"
             "/delemail\n"
+            "/delcookie email\n"
             "/addnum\n"
             "/delnumall\n"
             "/myrange\n"
@@ -3761,7 +3827,7 @@ def _ensure_login_inner(acc):
                     f"📧 Email: <code>{email}</code>\n"
                     f"❌ Cookie expired & login password gagal.\n\n"
                     f"Bot akan otomatis retry setiap 10 menit.\n"
-                    f"Pastikan password IVAS di /addemail masih benar."
+                    f"Perbarui cookie dengan /setcookie atau /addcookie."
                 ),
                 "parse_mode": "HTML"
             },
@@ -4705,9 +4771,13 @@ def login(acc, _retry=0):
         mark_worker_limited(worker_before)
         return login(acc, _retry=_retry + 1)
 
-    # IVAS 429 — skip, retry di cycle berikutnya
+    # IVAS 429 — exponential backoff, bukan rotasi worker
     if r.status_code == 429:
-        _log("LOGIN", f"IVAS 429 [{email}] — skip cycle, retry otomatis", Fore.YELLOW)
+        wait = min(20 * (2 ** _retry), 120)
+        _log("LOGIN", f"IVAS 429 [{email}] — tunggu {wait}s lalu retry", Fore.YELLOW)
+        time.sleep(wait)
+        if _retry < 4:
+            return login(acc, _retry=_retry + 1)
         return False
 
     # Sudah redirect ke /portal → session masih hidup
@@ -4720,43 +4790,22 @@ def login(acc, _retry=0):
 
     token = _csrf_from_html(r.text)
     if not token:
-        _log("LOGIN", f"CSRF TIDAK DITEMUKAN [{email}] di {r.url} — coba worker lain", Fore.YELLOW)
-        # Worker aktif diblok Cloudflare — coba semua worker lain sampai dapat form login
-        for alt_worker in WORKER_POOL:
-            if alt_worker == _IVAS_ORIGIN:
-                continue
-            try:
-                _alt_hdr = {k: v for k, v in dict(session.headers).items()
-                            if k.lower() != "x-requested-with"}
-                _alt_hdr["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-                r_alt = session.get(f"{alt_worker}/login", timeout=20, headers=_alt_hdr)
-                token = _csrf_from_html(r_alt.text)
-                if token:
-                    _log("LOGIN", f"CSRF ditemukan di worker {alt_worker} [{email}]", Fore.GREEN)
-                    r = r_alt  # pakai response dari worker yang berhasil
-                    break
-            except Exception:
-                continue
-        if not token:
-            _log("LOGIN", f"Semua worker CSRF gagal [{email}]", Fore.RED)
-            return False
+        _log("LOGIN", f"CSRF TIDAK DITEMUKAN [{email}] (status={r.status_code}, url={r.url})", Fore.RED)
+        _log("LOGIN", f"HTML[:200]={r.text[:200]!r}", Fore.RED)
+        if _retry < 2:
+            time.sleep(10)
+            return login(acc, _retry=_retry + 1)
+        return False
 
     acc["csrf_token"] = token
-
-    # Pakai URL aktual setelah redirect (bisa jadi worker URL, bukan LOGIN_URL asal)
-    actual_login_url = str(r.url)
-    actual_origin    = "/".join(actual_login_url.split("/")[:3])  # https://host
-
     session.headers.update({
         "X-CSRF-TOKEN":     token,
         "X-Requested-With": "XMLHttpRequest",
-        "Origin":           actual_origin,
-        "Referer":          actual_login_url,
     })
 
-    # POST login ke URL yang sama dengan tempat form di-serve (setelah redirect)
+    # POST login
     try:
-        r2 = session.post(actual_login_url, data={
+        r2 = session.post(LOGIN_URL, data={
             "_token":   token,
             "email":    email,
             "password": password,
@@ -4770,7 +4819,11 @@ def login(acc, _retry=0):
         return login(acc, _retry=_retry + 1)
 
     if r2.status_code == 429:
-        _log("LOGIN", f"IVAS 429 POST [{email}] — skip cycle, retry otomatis", Fore.YELLOW)
+        wait = min(20 * (2 ** _retry), 120)
+        _log("LOGIN", f"IVAS 429 POST [{email}] — tunggu {wait}s lalu retry", Fore.YELLOW)
+        time.sleep(wait)
+        if _retry < 4:
+            return login(acc, _retry=_retry + 1)
         return False
 
     _log("LOGIN", f"Response URL: {r2.url}", Fore.CYAN)
@@ -4876,10 +4929,14 @@ def get_ranges(acc, _retry=0):
     if is_worker_blocked(resp=r) and _retry < len(WORKER_POOL) - 1:
         mark_worker_limited(worker_before)
         return get_ranges(acc, _retry=_retry + 1)
-    # IVAS 429 — skip cycle, jangan block thread
+    # IVAS 429 — tunggu lalu retry (bukan rotasi worker)
     if r.status_code == 429:
+        wait = min(30 * (2 ** _retry), 180)
         email = acc.get("email", "")
-        _log("MYRANGE", f"IVAS 429 [{email}] get_ranges — skip cycle, retry otomatis", Fore.YELLOW)
+        _log("MYRANGE", f"IVAS 429 [{email}] get_ranges — tunggu {wait}s", Fore.YELLOW)
+        time.sleep(wait)
+        if _retry < 3:
+            return get_ranges(acc, _retry=_retry + 1)
         return []
     if _is_login_page(r):
         _invalidate_session(acc, f"SESSION_EXPIRED: get_ranges ({r.url})")
@@ -5195,7 +5252,7 @@ def listen_command():
                     elif text.startswith("/listakun"): 
                         if owner: list_accounts(chat_id, user_id)
                         else: send_msg(chat_id, "  Khusus OWNER")
-                    elif text.startswith("/addcookie_disabled"):
+                    elif text.startswith("/addcookie"):
                         if use_token(user_id):
                             add_cookie_premium(text, chat_id, user_id)
                             send_activity_log(user_id, udisp, "/addcookie")
@@ -5325,11 +5382,27 @@ def listen_command():
                     elif text.startswith("/delakun"): 
                         if owner: command_delakun(chat_id, user_id) 
                         else: send_msg(chat_id, "❌ Khusus OWNER")
-                    elif text.startswith("/setcookie_disabled"):
+                    elif text.startswith("/setcookie"): 
                         if owner: cmd_setcookie(chat_id)
                         else: send_msg(chat_id, "❌ Khusus OWNER")
                     elif text.startswith("/statsms"): 
                         if owner: stats_sms(chat_id) 
+                        else: send_msg(chat_id, "❌ Khusus OWNER")
+                    elif text.startswith("/listappemoji"):
+                        if owner:
+                            all_e = _APP_EMOJI.get("__all__", [])
+                            if not all_e:
+                                send_msg(chat_id, "⚠️ ApplicationEmoji belum di-load. Restart bot dulu.")
+                            else:
+                                mapped = {v: k for k, v in _APP_EMOJI.items() if k != "__all__"}
+                                lines = ["📦 <b>ApplicationEmoji Pack</b>
+<blockquote>"]
+                                for item in all_e:
+                                    svc = mapped.get(item["cid"], "—")
+                                    lines.append(f"#{item['idx']+1} {item['emoji']}  <code>{item['cid']}</code>  → {svc}")
+                                lines.append("</blockquote>")
+                                send_msg(chat_id, "
+".join(lines))
                         else: send_msg(chat_id, "❌ Khusus OWNER")
                 except Exception as ex: 
                     print(f"Error handling message: {ex}")
@@ -5419,29 +5492,37 @@ def poll_one_account(acc):
                 dial_code   = code.lstrip("+") if code else ""
                 last4       = full_num[-4:] if len(full_num) >= 4 else full_num
 
-            # Format Garage OTP: FLAG #CODE 💬+DIALCODE 🔢 LAST4 #SERVICE
+            # Format X two world: FLAG REGION_CODE  SVC_EMOJI OTP+MAT+LAST4
             masked_num = format_phone_number(full_num)
-            # Pilih emoji sesuai service
-            _svc_emoji_map = {
-                "#WS": "💬", "#TG": "✈️", "#G": "🔍", "#FB": "👥",
-                "#IG": "📸", "#TT": "🎵", "#GR": "🚗", "#GJ": "🛵",
-                "#SP": "🛒", "#TP": "🛍️",
+            # Emoji fallback (tampil kalau user non-Premium / custom emoji gagal load)
+            _svc_fallback = {
+                "#WS": "💬", "#TG": "✈️", "#G":  "🔍", "#FB": "📘",
+                "#IG": "📷", "#TT": "🎵", "#GR": "🚗", "#GJ": "🛵",
+                "#SP": "🟠", "#TP": "🛍️",
             }
-            _svc_icon = _svc_emoji_map.get(service_name, "💬")
+            _fallback = _svc_fallback.get(service_name, "💬")
+            _cid = _APP_EMOJI.get(service_name, "")
+            # Pakai <tg-emoji> kalau ID berhasil di-load, fallback ke emoji teks biasa
+            if _cid:
+                _svc_icon = f'<tg-emoji emoji-id="{_cid}">{_fallback}</tg-emoji>'
+            else:
+                _svc_icon = _fallback
+            # Teks pesan X two world: {FLAG} {REGION}  {SVC_EMOJI} {OTP}MAT{LAST4}
             msg = (
-                f"{flag} <b>#{region_code}</b>  {_svc_icon} <code>+{dial_code}</code>  🔢 <code>{last4}</code>  <b>{service_name}</b>"
+                f"{flag} <b>{region_code}</b>  {_svc_icon} <code>{otp}MAT{last4}</code>"
             )
 
-            # Tombol Garage-style: GET OTP (copy) + NUMBER + CHANNEL
-            _GROUP_LINK = "https://t.me/matttttcha"
+            # Tombol X two world style
+            _CHANNEL_LINK = "https://t.me/matttttcha"
+            _NUMBER_LINK  = "https://t.me/matttttcha"
 
             for gid in send_targets:
                 try:
                     _kb = {"inline_keyboard": [
-                        [{"text": f"⚡ {otp} ⚡", "copy_text": {"text": otp}}],
+                        [{"text": f"» 📋 {otp}", "copy_text": {"text": otp}}],
                         [
-                            {"text": "📱 NUMBER ↗", "url": _GROUP_LINK},
-                            {"text": "📢 CHANNEL ↗", "url": _GROUP_LINK},
+                            {"text": "🏆 Channel ↗", "url": _CHANNEL_LINK},
+                            {"text": "✉️ Number ↗",  "url": _NUMBER_LINK},
                         ],
                     ]}
                     import requests as _req
@@ -5514,9 +5595,12 @@ def _notify_cookie_expired(email, uid):
     msg = (
         f"⚠️ <b>COOKIE EXPIRED — AUTO REFRESH GAGAL</b>\n\n"
         f"📧 Email: <code>{email}</code>\n"
-        f"❌ Cookie expired, sedang otomatis coba re-login...\n\n"
-        f"<blockquote>Jika gagal terus, pastikan password IVAS masih benar.\n"
-        f"Gunakan /delemail lalu /addemail ulang dengan password yang benar.</blockquote>"
+        f"❌ Cookie sudah expired dan tidak bisa auto-login.\n\n"
+        f"<blockquote>Silakan perbarui cookie dengan:\n"
+        f"• Owner  : /setcookie\n"
+        f"• User   : /addcookie\n\n"
+        f"💡 Ambil cookie fresh dari browser:\n"
+        f"DevTools → Application → Cookies → copy semua</blockquote>"
     )
     # Kirim notif HANYA ke pemilik akun (bukan bocor ke owner kalau akun milik user)
     target = uid if uid else OWNER_ID
@@ -5638,8 +5722,11 @@ def auto_cookie_refresher():
                                 warn_msg = (
                                     f"⚠️ <b>SESSION WARNING</b>\n\n"
                                     f"📧 Email: <code>{email}</code>\n"
-                                    f"Session tidak merespons, sedang otomatis retry login...\n\n"
-                                    f"<blockquote>Jika gagal terus, cek password IVAS masih benar via /addemail</blockquote>"
+                                    f"Session tidak merespons. Kemungkinan cookie akan segera expired.\n\n"
+                                    f"<blockquote>Bot sedang otomatis retry...\n"
+                                    f"Jika berlanjut, segera perbarui cookie dengan:\n"
+                                    f"• Owner: /setcookie\n"
+                                    f"• User: /addcookie</blockquote>"
                                 )
                                 # Kirim HANYA ke pemilik akun (tidak bocor ke owner jika akun milik user)
                                 warn_target = uid if uid else OWNER_ID
@@ -6279,6 +6366,7 @@ def _init_bot_username():
     except Exception as e:
         _log("BOT", f"getMe error: {e}", Fore.YELLOW)
 _init_bot_username()
+_load_app_emoji()   # Fetch custom emoji ApplicationEmoji pack
 db_init()
 
 _print_banner(BOT_USERNAME)
