@@ -345,6 +345,7 @@ _keepalive_warn_count     = {}    # email -> jumlah gagal keepalive berturut-tur
 # ================= RANGES CACHE (kurangi beban IVAS server) =================
 _ranges_cache    = {}   # email -> (timestamp, ranges_list)
 RANGES_CACHE_TTL = 300  # 5 menit — ranges jarang berubah
+_ranges_429_until = {}  # email -> timestamp sampai kapan skip get_ranges (non-blocking 429 cooldown)
 
 # ================= RECV CSRF CACHE =================
 # iVAS pakai per-page CSRF — /portal/sms/received punya token berbeda dari /portal
@@ -4921,6 +4922,8 @@ def _fetch_myrange_data(acc, _retry=0):
         ensure_login(acc)
         return _fetch_myrange_data(acc, _retry=_retry + 1)
 
+    if resp.status_code == 429:
+        raise Exception("Rate limited (HTTP 429) — server IVAS membatasi request. Coba lagi beberapa menit.")
     if resp.status_code != 200:
         raise Exception(f"HTTP {resp.status_code}")
     return resp.json()
@@ -4928,6 +4931,13 @@ def _fetch_myrange_data(acc, _retry=0):
 
 def get_ranges(acc, _retry=0):
     today = datetime.now().strftime("%Y-%m-%d")
+    email = acc.get("email", "")
+
+    # Jika masih dalam cooldown 429 non-blocking — kembalikan cache lama langsung
+    if time.time() < _ranges_429_until.get(email, 0):
+        entry = _ranges_cache.get(email)
+        return entry[1] if entry else []
+
     csrf  = get_recv_csrf(acc)
     worker_before = _IVAS_ORIGIN
     r = acc["session"].post(GET_RANGE_URL,
@@ -4937,15 +4947,13 @@ def get_ranges(acc, _retry=0):
     if is_worker_blocked(resp=r) and _retry < len(WORKER_POOL) - 1:
         mark_worker_limited(worker_before)
         return get_ranges(acc, _retry=_retry + 1)
-    # IVAS 429 — tunggu lalu retry (bukan rotasi worker)
+    # IVAS 429 — JANGAN block thread dengan sleep. Set cooldown non-blocking dan pakai cache lama.
     if r.status_code == 429:
-        wait = min(30 * (2 ** _retry), 180)
-        email = acc.get("email", "")
-        _log("MYRANGE", f"IVAS 429 [{email}] get_ranges — tunggu {wait}s", Fore.YELLOW)
-        time.sleep(wait)
-        if _retry < 3:
-            return get_ranges(acc, _retry=_retry + 1)
-        return []
+        cooldown = 180  # 3 menit sebelum boleh coba lagi
+        _ranges_429_until[email] = time.time() + cooldown
+        entry = _ranges_cache.get(email)
+        _log("MYRANGE", f"IVAS 429 [{email}] get_ranges — cooldown {cooldown}s, pakai cache lama", Fore.YELLOW)
+        return entry[1] if entry else []
     if _is_login_page(r):
         _invalidate_session(acc, f"SESSION_EXPIRED: get_ranges ({r.url})")
     soup = BeautifulSoup(r.text, "html.parser")
@@ -4954,19 +4962,29 @@ def get_ranges(acc, _retry=0):
         if "toggleRange" in div["onclick"]:
             try: ranges.append(div["onclick"].split("'")[1])
             except: pass
-    return list(set(ranges))
+    result = list(set(ranges))
+    # Clear 429 cooldown kalau sukses
+    _ranges_429_until.pop(email, None)
+    return result
 
 def get_ranges_cached(acc):
-    """Cache ranges 5 menit. Auto-invalidate saat session expired."""
+    """Cache ranges 5 menit. Saat 429 cooldown aktif, pakai stale cache tanpa hit server."""
     email = acc.get("email", "")
     now   = time.time()
     entry = _ranges_cache.get(email)
+    # Jika dalam cooldown 429 — langsung kembalikan cache lama (stale OK)
+    if now < _ranges_429_until.get(email, 0):
+        return entry[1] if entry else []
     if entry:
         ts, cached_ranges = entry
         if now - ts < RANGES_CACHE_TTL:
             return cached_ranges
     ranges = get_ranges(acc)
-    _ranges_cache[email] = (now, ranges)
+    # Hanya update cache jika dapat data valid — jangan timpa cache bagus dengan [] saat 429
+    if ranges:
+        _ranges_cache[email] = (now, ranges)
+    elif not entry:
+        _ranges_cache[email] = (now, [])
     return ranges
 
 def get_numbers(acc, rng, _retry=0):
