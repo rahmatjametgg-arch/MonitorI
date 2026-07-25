@@ -125,9 +125,9 @@ def make_session(cookies: dict, timeout=30):
         "User-Agent":       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                             "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "X-Requested-With": "XMLHttpRequest",
-        # Gunakan origin/referer asli IVAS agar tidak ditolak karena header worker
-        "Origin":           "https://ivasms.com",
-        "Referer":          "https://ivasms.com/",
+        "Origin":           base,
+        "Referer":          f"{base}/",
+        "X-Forwarded-Host": host,
     }
     s = httpx.Client(
         follow_redirects=True,
@@ -553,46 +553,36 @@ def keepalive_worker(accounts):
             idx = acc["idx"]
             if now - _last_keepalive.get(idx, 0) < KEEPALIVE_INTERVAL:
                 continue
-            try:
+
+            session_ok = False
+            for _ in range(len(WORKER_POOL)):
                 base = get_base()
-                r    = acc["session"].get(f"{base}/portal", timeout=15)
-                _log("DEBUG", f"STATUS : {r.status_code}", Fore.MAGENTA)
-                _log("DEBUG", f"URL    : {r.url}", Fore.MAGENTA)
-                if r.history:
-                    for h in r.history:
-                        _log("DEBUG", f"REDIRECT {h.status_code} -> {h.headers.get('Location')}", Fore.MAGENTA)
-                _log("DEBUG", f"SERVER : {r.headers.get('Server')}", Fore.MAGENTA)
-                if r.status_code != 200 or "/login" in str(r.url):
-                    _log("DEBUG", r.text[:500], Fore.MAGENTA)
-                if r.status_code == 200 and "/login" not in str(r.url):
-                    _log("KA-OK", f"akun #{idx} session aktif", Fore.GREEN)
-                    # Hapus CSRF cache agar di-refresh saat poll berikutnya
-                    _recv_csrf_cache.pop(idx, None)
-                else:
-                    _log("KA-WARN", f"akun #{idx} — session mungkin expired. "
-                                    f"Update cookie.json dan restart bot.", Fore.YELLOW)
-                    if OWNER_ID:
-                        try:
-                            requests.post(
-                                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                                data={
-                                    "chat_id":    OWNER_ID,
-                                    "text":       (
-                                        f"⚠️ <b>SESSION EXPIRED</b>\n\n"
-                                        f"Akun #{idx} tidak bisa akses IVAS.\n"
-                                        f"Update <code>cookie.json</code> dengan cookie fresh "
-                                        f"dari browser, lalu restart bot."
-                                    ),
-                                    "parse_mode": "HTML",
-                                },
-                                timeout=10,
-                            )
-                        except:
-                            pass
-            except Exception as e:
-                _log("KA-ERR", f"akun #{idx}: {e}", Fore.YELLOW)
+                try:
+                    r = acc["session"].get(f"{base}/portal", timeout=15)
+
+                    if is_worker_blocked(r):
+                        _log("KEEPALIVE", f"Worker rate limited ({base}), pindah worker...", Fore.YELLOW)
+                        mark_worker_limited(base)
+                        continue
+
+                    if r.status_code == 200 and "/login" not in str(r.url):
+                        _recv_csrf_cache.pop(idx, None)
+                        _log("KA-OK", f"akun #{idx} session aktif", Fore.GREEN)
+                        session_ok = True
+                        break
+
+                    if "/login" in str(r.url):
+                        break
+
+                except Exception as e:
+                    _log("KA-ERR", f"{base}: {e}", Fore.YELLOW)
+                    mark_worker_limited(base)
+
+            if not session_ok:
+                _log("KA-WARN", f"akun #{idx} tidak dapat diverifikasi. Session/login perlu dicek hanya jika semua worker normal namun tetap redirect ke login.", Fore.YELLOW)
+
             _last_keepalive[idx] = now
-            time.sleep(2)  # Jeda kecil antar akun
+            time.sleep(2)
         time.sleep(60)
 
 # ── HTTP HEALTH SERVER (Railway healthcheck) ──────────────────────────────────
