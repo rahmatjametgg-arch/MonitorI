@@ -1,6 +1,7 @@
 """
 SPIDERMAT OTP BOT — FORWARD MODE
 Baca cookie dari cookie.json → poll IVAS → forward OTP ke Telegram.
+Command: /addbot /removebot /listbot
 """
 
 import httpx
@@ -29,15 +30,18 @@ init(autoreset=True)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CONFIG
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-BOT_TOKEN    = os.getenv("BOT_TOKEN", "")           # wajib diset via env var
+BOT_TOKEN    = os.getenv("BOT_TOKEN", "")   # wajib diset via env var
 OWNER_ID     = int(os.getenv("OWNER_ID", "0"))
 
-FORWARD_TO   = -1003686221386                        # group/channel tujuan OTP
+# Grup default yang SELALU menerima OTP (tetap ada meskipun tidak /addbot)
+DEFAULT_TARGET = -1003686221386
+
 CHANNEL_LINK = "https://t.me/matttttcha"
 NUMBER_LINK  = "https://t.me/matttttcha"
 
 COOKIE_FILE        = "cookie.json"
 CACHE_FILE         = "file/sent_cache.json"
+GROUPS_FILE        = "file/groups.json"     # daftar grup tambahan via /addbot
 MAX_CACHE          = 2000
 POLL_INTERVAL_MAX  = 3.0    # detik — jeda maks saat tidak ada OTP baru
 KEEPALIVE_INTERVAL = 480    # detik — ping /portal tiap 8 menit
@@ -64,6 +68,8 @@ _LOG_ICONS = {
     "THREAD+":  "🧵",
     "SHUTDOWN": "🛑",
     "FATAL":    "💀",
+    "CMD":      "⌨️ ",
+    "GROUP":    "👥",
 }
 
 def _log(tag, msg, color=Fore.CYAN):
@@ -126,7 +132,7 @@ def is_worker_blocked(resp) -> bool:
 def load_cookies():
     """
     Format yang didukung:
-      1. [{"name":"k","value":"v"}, ...]          — array Netscape/browser export
+      1. [{"name":"k","value":"v"}, ...]          — array browser export
       2. {"email": {"laravel_session": "x"}, ...} — multi-akun per email
       3. {"laravel_session": "x", ...}            — flat single akun
     Return: list of cookie-dict (satu dict per akun).
@@ -233,7 +239,6 @@ def _recv_headers(base):
 def get_ranges(acc, _retry=0):
     idx = acc["idx"]
     now = time.time()
-    # Non-blocking 429 cooldown
     if now < _ranges_429_until.get(idx, 0):
         entry = _ranges_cache.get(idx)
         return entry[1] if entry else []
@@ -347,7 +352,6 @@ def get_sms(acc, rng, number, _retry=0):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PLATFORM DETECTION  (emoji + nama lengkap)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# key -> {icon, name, short}
 SERVICE_INFO = {
     "WHATSAPP":  {"icon": "💬",  "name": "WhatsApp",  "short": "#WS"},
     "TELEGRAM":  {"icon": "✈️",  "name": "Telegram",  "short": "#TG"},
@@ -368,7 +372,6 @@ _SVC_PATTERN = re.compile(
 )
 
 def detect_service(text: str) -> dict:
-    """Return SERVICE_INFO entry yang cocok, atau _SVC_DEFAULT."""
     m = _SVC_PATTERN.search(text)
     if m:
         return SERVICE_INFO.get(m.group(1).upper(), _SVC_DEFAULT)
@@ -412,56 +415,52 @@ def normalize_number(num: str, country_code: str) -> str:
     return num
 
 def mask_phone(number: str) -> str:
-    """Sensor nomor: tampilkan 4 digit awal dan 4 digit akhir."""
     n = str(number).replace("+", "").replace(" ", "")
     if len(n) >= 10:
-        return f"+{n[:4]}{'*' * (len(n) - 8)}{n[-4:]}"
+        return f"+{n[:4]}{'·' * 4}{n[-4:]}"
     return f"+{n}"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # MESSAGE BUILDER  (tampilan premium Telegram HTML)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_DIV  = "━" * 22
-_DIV2 = "┄" * 22
-
 def build_otp_message(
-    otp:        str,
-    svc:        dict,   # dict dari SERVICE_INFO / _SVC_DEFAULT
-    flag:       str,
-    country:    str,
+    otp:         str,
+    svc:         dict,
+    flag:        str,
+    country:     str,
     region_code: str,
-    masked_num: str,
+    masked_num:  str,
 ) -> str:
     """
-    Format pesan OTP premium.
+    Contoh output di Telegram:
 
-    Contoh output:
-    ┌──────────────────────────┐
-    │ 💬  WHATSAPP             │
-    ├──────────────────────────┤
-    │ 🇮🇩  Indonesia  ·  ID   │
-    │ 📱  +62812****7890       │
-    ├──────────────────────────┤
-    │ 🔑  5 8 3 1 6 2          │
-    ├──────────────────────────┤
-    │ ⏱  26 Jul 2026 · 14:32  │
-    └──────────────────────────┘
+    ╔══════════════════════╗
+    ║  💬  WHATSAPP        ║
+    ╚══════════════════════╝
+    🌍  Indonesia  ·  🇮🇩  ID
+    📱  +6281····7890
+
+    🔐  OTP CODE
+        <code>5 8 3 1 6 2</code>
+
+    ⏱  26 Jul 2026  ·  14:32:07
     """
-    spaced_otp = " ".join(list(otp))
-    ts         = datetime.now().strftime("%d %b %Y  ·  %H:%M:%S")
-    title      = f"{svc['icon']}  <b>{svc['name'].upper()}</b>"
+    spaced = " ".join(list(otp))
+    ts     = datetime.now().strftime("%d %b %Y  ·  %H:%M:%S")
+    line   = "━" * 24
 
     return (
-        f"{_DIV}\n"
-        f"  {title}\n"
-        f"{_DIV}\n"
+        f"╔{'═' * 24}╗\n"
+        f"  {svc['icon']}  <b>{svc['name'].upper()}</b>\n"
+        f"╚{'═' * 24}╝\n"
         f"\n"
-        f"{flag}  <b>{country.title()}</b>  ·  <code>{region_code}</code>\n"
+        f"🌍  <b>{country.title()}</b>  ·  {flag}  <code>{region_code}</code>\n"
         f"📱  <code>{masked_num}</code>\n"
         f"\n"
-        f"{_DIV2}\n"
-        f"🔑  <b><code>{spaced_otp}</code></b>\n"
-        f"{_DIV2}\n"
+        f"{line}\n"
+        f"🔐  <b>OTP CODE</b>\n"
+        f"    <b><code>{spaced}</code></b>\n"
+        f"{line}\n"
         f"\n"
         f"<i>⏱  {ts}</i>"
     )
@@ -509,58 +508,245 @@ def cache_add(uid: str):
         _cache_dirty = False
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# GROUP TARGETS  (daftar grup tujuan OTP, bisa ditambah via /addbot)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_targets_lock    = threading.Lock()
+_forward_targets: set = {DEFAULT_TARGET}   # mulai dengan default group
+
+def _load_groups():
+    """Baca groups.json dan merge ke _forward_targets saat startup."""
+    if not os.path.exists(GROUPS_FILE):
+        return
+    try:
+        with open(GROUPS_FILE, "r", encoding="utf-8") as f:
+            ids = json.load(f)
+        if isinstance(ids, list):
+            with _targets_lock:
+                for gid in ids:
+                    _forward_targets.add(int(gid))
+        _log("GROUP", f"{len(ids)} grup dimuat dari {GROUPS_FILE}", Fore.CYAN)
+    except Exception as e:
+        _log("GROUP", f"load error: {e}", Fore.YELLOW)
+
+def _save_groups():
+    try:
+        os.makedirs("file", exist_ok=True)
+        with _targets_lock:
+            ids = list(_forward_targets)
+        with open(GROUPS_FILE, "w", encoding="utf-8") as f:
+            json.dump(ids, f)
+    except Exception as e:
+        _log("GROUP", f"save error: {e}", Fore.YELLOW)
+
+def add_group(chat_id: int) -> bool:
+    """Tambah grup. Return True jika baru, False jika sudah ada."""
+    with _targets_lock:
+        if chat_id in _forward_targets:
+            return False
+        _forward_targets.add(chat_id)
+    _save_groups()
+    return True
+
+def remove_group(chat_id: int) -> bool:
+    """Hapus grup. Return True jika berhasil, False jika tidak ada."""
+    with _targets_lock:
+        if chat_id not in _forward_targets or chat_id == DEFAULT_TARGET:
+            return False
+        _forward_targets.discard(chat_id)
+    _save_groups()
+    return True
+
+def list_groups() -> list:
+    with _targets_lock:
+        return list(_forward_targets)
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TELEGRAM SEND
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 _tg_session = requests.Session()
 _tg_session.mount("https://", requests.adapters.HTTPAdapter(
-    pool_connections=2, pool_maxsize=5, max_retries=0,
+    pool_connections=4, pool_maxsize=10, max_retries=0,
 ))
 
+def _tg_post(chat_id, text, reply_markup=None, retries=3):
+    """Kirim satu pesan ke satu chat_id. Return True jika sukses."""
+    payload = {
+        "chat_id":                  chat_id,
+        "text":                     text,
+        "parse_mode":               "HTML",
+        "disable_web_page_preview": True,
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    for attempt in range(retries):
+        try:
+            r    = _tg_session.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json=payload,
+                timeout=10,
+            )
+            data = r.json()
+            if data.get("ok"):
+                return True
+            if r.status_code == 429:
+                wait = data.get("parameters", {}).get("retry_after", 5)
+                time.sleep(wait + 1)
+                continue
+            _log("TG-ERR", f"chat {chat_id}: {data.get('description', '?')}", Fore.RED)
+            return False
+        except Exception as e:
+            if attempt == retries - 1:
+                _log("TG-ERR", f"chat {chat_id}: {e}", Fore.RED)
+            else:
+                time.sleep(1.5 ** (attempt + 1))
+    return False
+
+def tg_send_msg(chat_id: int, text: str):
+    """Kirim pesan plain ke satu chat (untuk balasan command)."""
+    _tg_post(chat_id, text)
+
 def tg_send_otp(otp: str, msg_text: str):
-    """Kirim pesan OTP ke FORWARD_TO dengan inline keyboard."""
+    """
+    Kirim pesan OTP ke SEMUA grup yang terdaftar di _forward_targets.
+    Setiap target dikirimi secara paralel.
+    """
     kb = {
         "inline_keyboard": [
-            # Baris 1 — tombol copy OTP (native Telegram copy_text)
-            [{"text": f"📋  Copy OTP  ·  {otp}", "copy_text": {"text": otp}}],
-            # Baris 2 — channel & number
+            [{"text": f"📋  Copy OTP  —  {otp}", "copy_text": {"text": otp}}],
             [
                 {"text": "🏆  Channel", "url": CHANNEL_LINK},
                 {"text": "📱  Number",  "url": NUMBER_LINK},
             ],
         ]
     }
-    for attempt in range(3):
-        try:
-            r    = _tg_session.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                json={
-                    "chat_id":                FORWARD_TO,
-                    "text":                   msg_text,
-                    "parse_mode":             "HTML",
-                    "reply_markup":           kb,
-                    "disable_web_page_preview": True,
-                },
-                timeout=10,
-            )
-            data = r.json()
-            if data.get("ok"):
-                return
-            if r.status_code == 429:
-                wait = data.get("parameters", {}).get("retry_after", 5)
-                time.sleep(wait + 1)
-                continue
-            _log("TG-ERR", data.get("description", "?"), Fore.RED)
+    targets = list_groups()
+
+    def _send_one(cid):
+        _tg_post(cid, msg_text, reply_markup=kb)
+
+    if len(targets) == 1:
+        _send_one(targets[0])
+    else:
+        with ThreadPoolExecutor(max_workers=min(8, len(targets)), thread_name_prefix="tgsend") as pool:
+            list(pool.map(_send_one, targets))
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# COMMAND HANDLER  (/addbot /removebot /listbot)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def handle_command(update: dict):
+    """Proses satu update dari getUpdates. Tangani command yang dikenal."""
+    msg = update.get("message") or update.get("edited_message")
+    if not msg:
+        return
+
+    chat      = msg.get("chat", {})
+    chat_id   = chat.get("id")
+    chat_type = chat.get("type", "")       # private / group / supergroup / channel
+    chat_name = chat.get("title") or chat.get("username") or str(chat_id)
+    user      = msg.get("from", {})
+    user_id   = user.get("id", 0)
+    text      = (msg.get("text") or "").strip()
+
+    # Ambil command (tanpa @botname suffix)
+    cmd = text.split()[0].split("@")[0].lower() if text.startswith("/") else ""
+
+    if cmd == "/addbot":
+        if chat_type not in ("group", "supergroup"):
+            tg_send_msg(chat_id,
+                "⚠️ <b>Perintah ini hanya bisa digunakan di dalam grup.</b>\n"
+                "Tambahkan bot ke grup, lalu ketik <code>/addbot</code> di grup tersebut.")
             return
+
+        if add_group(chat_id):
+            _log("GROUP", f"✅ ditambahkan: {chat_name} ({chat_id})", Fore.GREEN)
+            tg_send_msg(chat_id,
+                f"╔{'═' * 26}╗\n"
+                f"  ✅  <b>BOT AKTIF</b>\n"
+                f"╚{'═' * 26}╝\n"
+                f"\n"
+                f"🏠  <b>{chat_name}</b>\n"
+                f"🆔  <code>{chat_id}</code>\n"
+                f"\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"✦  Grup ini sudah terdaftar.\n"
+                f"✦  OTP akan diteruskan ke sini secara otomatis.\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"\n"
+                f"<i>Gunakan /removebot untuk menonaktifkan.</i>")
+        else:
+            tg_send_msg(chat_id,
+                f"ℹ️  <b>{chat_name}</b> sudah terdaftar sebelumnya.\n"
+                f"Bot sudah aktif di grup ini.")
+
+    elif cmd == "/removebot":
+        if chat_type not in ("group", "supergroup"):
+            return
+
+        if chat_id == DEFAULT_TARGET:
+            tg_send_msg(chat_id,
+                "⛔  Grup utama tidak bisa dihapus dari daftar target.")
+            return
+
+        if remove_group(chat_id):
+            _log("GROUP", f"🗑️  dihapus: {chat_name} ({chat_id})", Fore.YELLOW)
+            tg_send_msg(chat_id,
+                f"🗑️  <b>{chat_name}</b> telah dikeluarkan dari daftar penerima OTP.\n"
+                f"Ketik /addbot untuk mendaftarkan kembali.")
+        else:
+            tg_send_msg(chat_id,
+                f"ℹ️  Grup ini tidak ada dalam daftar terdaftar.")
+
+    elif cmd == "/listbot":
+        # Hanya bisa diakses owner (OWNER_ID) atau dari dalam grup mana pun
+        groups  = list_groups()
+        lines   = [f"  {i+1}.  <code>{gid}</code>" for i, gid in enumerate(groups)]
+        total   = len(groups)
+        tg_send_msg(chat_id,
+            f"╔{'═' * 26}╗\n"
+            f"  👥  <b>DAFTAR GRUP AKTIF</b>\n"
+            f"╚{'═' * 26}╝\n"
+            f"\n"
+            + "\n".join(lines) +
+            f"\n\n<i>Total: {total} grup terdaftar</i>")
+
+def tg_update_listener():
+    """
+    Long-polling getUpdates dari Telegram.
+    Handle command /addbot /removebot /listbot.
+    Berjalan sebagai daemon thread terpisah.
+    """
+    offset  = 0
+    api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
+    _log("CMD", "update listener aktif", Fore.CYAN)
+
+    while True:
+        try:
+            resp = _tg_session.post(
+                api_url,
+                json={"offset": offset, "timeout": 30, "allowed_updates": ["message"]},
+                timeout=40,
+            )
+            data = resp.json()
+            if not data.get("ok"):
+                time.sleep(5)
+                continue
+
+            for upd in data.get("result", []):
+                offset = upd["update_id"] + 1
+                try:
+                    handle_command(upd)
+                except Exception as e:
+                    _log("CMD", f"handle error: {e}", Fore.YELLOW)
+
+        except requests.exceptions.Timeout:
+            pass   # long-poll timeout normal, lanjut loop
         except Exception as e:
-            if attempt == 2:
-                _log("TG-ERR", str(e), Fore.RED)
-            else:
-                time.sleep(1.5 ** (attempt + 1))
+            _log("CMD", f"listener error: {e}", Fore.YELLOW)
+            time.sleep(5)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # POLL ONE ACCOUNT
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Regex OTP: 6 digit, format XXXXXX / XXX XXX / XXX-XXX
 _OTP_RE = re.compile(r"\b\d{3}[- ]?\d{3}\b")
 
 def poll_one(acc) -> bool:
@@ -597,10 +783,10 @@ def poll_one(acc) -> bool:
             if not matches:
                 continue
 
-            otp                      = re.sub(r"[^0-9]", "", matches[0])
-            svc                      = detect_service(sms)
+            otp                       = re.sub(r"[^0-9]", "", matches[0])
+            svc                       = detect_service(sms)
             country, flag, region_code = detect_country_and_flag(full_num, fallback_country)
-            masked                   = mask_phone(full_num)
+            masked                    = mask_phone(full_num)
 
             msg = build_otp_message(otp, svc, flag, country, region_code, masked)
             tg_send_otp(otp, msg)
@@ -655,7 +841,7 @@ def account_worker(acc):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # KEEPALIVE  (ping /portal agar session tidak expire)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_last_keepalive = {}   # idx -> ts
+_last_keepalive = {}
 
 def keepalive_worker(accounts):
     _log("KEEPALIVE", f"aktif — ping tiap {KEEPALIVE_INTERVAL}s per akun", Fore.CYAN)
@@ -676,7 +862,7 @@ def keepalive_worker(accounts):
                         mark_worker_limited(base)
                         continue
                     if r.status_code == 200 and "/login" not in str(r.url):
-                        _recv_csrf_cache.pop(idx, None)   # refresh CSRF saat poll berikutnya
+                        _recv_csrf_cache.pop(idx, None)
                         _log("KA-OK", f"akun #{idx} — session aktif ✓", Fore.GREEN)
                         session_ok = True
                         break
@@ -693,28 +879,18 @@ def keepalive_worker(accounts):
                     f"Update cookie.json & restart bot jika semua worker normal.",
                     Fore.YELLOW,
                 )
-                # Kirim notif ke OWNER_ID jika berbeda dengan FORWARD_TO
-                if OWNER_ID and OWNER_ID != FORWARD_TO:
+                if OWNER_ID and OWNER_ID != DEFAULT_TARGET:
                     try:
-                        requests.post(
-                            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                            data={
-                                "chat_id":    OWNER_ID,
-                                "text":       (
-                                    f"⚠️ <b>SESSION EXPIRED</b>\n\n"
-                                    f"Akun #{idx} tidak bisa akses portal IVAS.\n"
-                                    f"Perbarui <code>cookie.json</code> dengan cookie fresh "
-                                    f"dari browser, lalu restart bot."
-                                ),
-                                "parse_mode": "HTML",
-                            },
-                            timeout=10,
-                        )
+                        _tg_post(OWNER_ID,
+                            f"⚠️ <b>SESSION EXPIRED</b>\n\n"
+                            f"Akun #{idx} tidak bisa akses portal IVAS.\n"
+                            f"Perbarui <code>cookie.json</code> dengan cookie fresh "
+                            f"dari browser, lalu restart bot.")
                     except:
                         pass
 
             _last_keepalive[idx] = now
-            time.sleep(2)   # jeda kecil antar akun
+            time.sleep(2)
         time.sleep(60)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -733,27 +909,27 @@ class HealthHandler(BaseHTTPRequestHandler):
                 "status":         "running",
                 "uptime_seconds": up,
                 "uptime":         f"{up // 3600}h {(up % 3600) // 60}m {up % 60}s",
-                "forward_to":     FORWARD_TO,
+                "targets":        list_groups(),
             }).encode()
             self._respond(200, "application/json", body)
         else:
             self._respond(404, "text/plain", b"Not found")
 
-    def _respond(self, code, content_type, body):
+    def _respond(self, code, ctype, body):
         self.send_response(code)
-        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
     def log_message(self, *args):
-        pass   # nonaktifkan log HTTP default
+        pass
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
     HTTPServer.allow_reuse_address = True
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    _log("SERVER", f"port {port}  |  GET /health  GET /status", Fore.CYAN)
+    _log("SERVER", f"port {port}  |  /health  /status", Fore.CYAN)
     server.serve_forever()
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -763,6 +939,7 @@ def _shutdown(signum, frame):
     _log("SHUTDOWN", "menyimpan cache & keluar...", Fore.YELLOW)
     with _sent_cache_lock:
         save_sent_cache_now(sent_cache)
+    _save_groups()
     _log("SHUTDOWN", "selesai.", Fore.YELLOW)
     sys.exit(0)
 
@@ -784,12 +961,14 @@ def main():
         _log("FATAL", "BOT_TOKEN belum diset! Set via environment variable.", Fore.RED)
         sys.exit(1)
 
+    # Muat daftar grup dari file (merge ke _forward_targets)
+    _load_groups()
+
     cookies_list = load_cookies()
     if not cookies_list:
         _log("FATAL", f"Tidak ada cookie valid di {COOKIE_FILE}. Isi dulu!", Fore.RED)
         sys.exit(1)
 
-    # Buat objek akun — satu httpx session per akun
     accounts = []
     for idx, ck in enumerate(cookies_list):
         acc = {
@@ -802,27 +981,27 @@ def main():
         _log("COOKIE", f"Akun #{idx} — {len(ck)} cookie dimuat", Fore.GREEN)
 
     print()
-    _log("CONFIG", f"Forward OTP  →  {FORWARD_TO}",          Fore.CYAN)
-    _log("CONFIG", f"Channel link →  {CHANNEL_LINK}",        Fore.CYAN)
-    _log("CONFIG", f"Worker pool  →  {len(WORKER_POOL)} proxy", Fore.CYAN)
-    _log("CONFIG", f"Keepalive    →  tiap {KEEPALIVE_INTERVAL}s", Fore.CYAN)
+    _log("CONFIG", f"Default target  →  {DEFAULT_TARGET}",         Fore.CYAN)
+    _log("CONFIG", f"Total target    →  {len(list_groups())} grup", Fore.CYAN)
+    _log("CONFIG", f"Channel link    →  {CHANNEL_LINK}",           Fore.CYAN)
+    _log("CONFIG", f"Worker pool     →  {len(WORKER_POOL)} proxy",  Fore.CYAN)
+    _log("CONFIG", f"Keepalive       →  tiap {KEEPALIVE_INTERVAL}s", Fore.CYAN)
     print()
 
-    # Thread background
-    threading.Thread(target=run_health_server,              daemon=True, name="health").start()
-    threading.Thread(target=keepalive_worker, args=(accounts,), daemon=True, name="keepalive").start()
+    # Jalankan semua thread background
+    threading.Thread(target=run_health_server,                     daemon=True, name="health").start()
+    threading.Thread(target=tg_update_listener,                    daemon=True, name="cmd-listener").start()
+    threading.Thread(target=keepalive_worker, args=(accounts,),    daemon=True, name="keepalive").start()
 
     for acc in accounts:
         threading.Thread(
-            target=account_worker,
-            args=(acc,),
-            daemon=True,
-            name=f"poll-{acc['idx']}",
+            target=account_worker, args=(acc,),
+            daemon=True, name=f"poll-{acc['idx']}",
         ).start()
         _log("THREAD+", f"Akun #{acc['idx']} — polling aktif", Fore.GREEN)
 
     print()
-    _log("CONFIG", "Bot berjalan. Menunggu OTP masuk...", Fore.CYAN)
+    _log("CONFIG", "Bot berjalan. Ketik /addbot di grup untuk mendaftarkan.", Fore.CYAN)
 
     # Main thread: flush cache secara periodik
     global _cache_dirty, _last_cache_save
