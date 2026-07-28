@@ -468,33 +468,80 @@ def get_sms(acc, rng, number, _retry=0):
     return list(dict.fromkeys(sms_texts))
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# PLATFORM DETECTION  (emoji + nama lengkap)
+# PLATFORM DETECTION  (kode pendek teks untuk header pesan)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# "code" = teks pendek yang muncul di header: WS, FB, IG, dst.
 SERVICE_INFO = {
-    "WHATSAPP":  {"icon": "💬",  "name": "WhatsApp",  "short": "#WS"},
-    "TELEGRAM":  {"icon": "✈️",  "name": "Telegram",  "short": "#TG"},
-    "GOOGLE":    {"icon": "🔍",  "name": "Google",    "short": "#G" },
-    "FACEBOOK":  {"icon": "📘",  "name": "Facebook",  "short": "#FB"},
-    "INSTAGRAM": {"icon": "📷",  "name": "Instagram", "short": "#IG"},
-    "TIKTOK":    {"icon": "🎵",  "name": "TikTok",    "short": "#TT"},
-    "GRAB":      {"icon": "🚗",  "name": "Grab",      "short": "#GR"},
-    "GOJEK":     {"icon": "🛵",  "name": "Gojek",     "short": "#GJ"},
-    "SHOPEE":    {"icon": "🟠",  "name": "Shopee",    "short": "#SP"},
-    "TOKOPEDIA": {"icon": "🛍️", "name": "Tokopedia", "short": "#TP"},
-    "PAYPAL":    {"icon": "🅿️",  "name": "PayPal",   "short": "#PP"},
+    "WHATSAPP":  {"icon": "💬",  "name": "WhatsApp",  "code": "WS"},
+    "TELEGRAM":  {"icon": "✈️",  "name": "Telegram",  "code": "TG"},
+    "GOOGLE":    {"icon": "🔍",  "name": "Google",    "code": "G" },
+    "FACEBOOK":  {"icon": "📘",  "name": "Facebook",  "code": "FB"},
+    "INSTAGRAM": {"icon": "📷",  "name": "Instagram", "code": "IG"},
+    "TIKTOK":    {"icon": "🎵",  "name": "TikTok",    "code": "TT"},
+    "GRAB":      {"icon": "🚗",  "name": "Grab",      "code": "GR"},
+    "GOJEK":     {"icon": "🛵",  "name": "Gojek",     "code": "GJ"},
+    "SHOPEE":    {"icon": "🟠",  "name": "Shopee",    "code": "SP"},
+    "TOKOPEDIA": {"icon": "🛍️", "name": "Tokopedia", "code": "TP"},
+    "PAYPAL":    {"icon": "🅿️",  "name": "PayPal",   "code": "PP"},
+    "TWITTER":   {"icon": "🐦",  "name": "Twitter",   "code": "TW"},
+    "AMAZON":    {"icon": "📦",  "name": "Amazon",    "code": "AMZ"},
+    "NETFLIX":   {"icon": "🎬",  "name": "Netflix",   "code": "NF"},
+    "APPLE":     {"icon": "🍎",  "name": "Apple",     "code": "APL"},
+    "MICROSOFT": {"icon": "🪟",  "name": "Microsoft", "code": "MS"},
+    "DISCORD":   {"icon": "🎮",  "name": "Discord",   "code": "DC"},
+    "SNAPCHAT":  {"icon": "👻",  "name": "Snapchat",  "code": "SC"},
+    "LINKEDIN":  {"icon": "💼",  "name": "LinkedIn",  "code": "LI"},
+    "BINANCE":   {"icon": "🪙",  "name": "Binance",   "code": "BNB"},
+    "BYBIT":     {"icon": "📊",  "name": "Bybit",     "code": "BB"},
+    "OKX":       {"icon": "💹",  "name": "OKX",       "code": "OKX"},
 }
-_SVC_DEFAULT = {"icon": "💌", "name": "OTP", "short": "#OT"}
+_SVC_DEFAULT = {"icon": "💌", "name": "OTP", "code": "OT"}
 
 _SVC_PATTERN = re.compile(
-    r"(WhatsApp|Telegram|Google|Facebook|Instagram|TikTok|Grab|Gojek|Shopee|Tokopedia|PayPal)",
+    r"(WhatsApp|Telegram|Google|Facebook|Instagram|TikTok|Grab|Gojek|Shopee|Tokopedia"
+    r"|PayPal|Twitter|Amazon|Netflix|Apple|Microsoft|Discord|Snapchat|LinkedIn"
+    r"|Binance|Bybit|OKX)",
     re.IGNORECASE,
 )
 
 def detect_service(text: str) -> dict:
     m = _SVC_PATTERN.search(text)
     if m:
-        return SERVICE_INFO.get(m.group(1).upper(), _SVC_DEFAULT)
+        key = m.group(1).upper()
+        # Normalisasi beberapa variasi nama
+        key = key.replace("TWITTER", "TWITTER")
+        return SERVICE_INFO.get(key, _SVC_DEFAULT)
     return _SVC_DEFAULT
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# LANGUAGE DETECTION  (dari isi teks SMS OTP)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_LANG_RULES = [
+    # (kode_bahasa, pattern_regex)
+    ("ID", re.compile(r"\b(kode|verifikasi|masukkan|jangan|bagikan|konfirmasi|berlaku|menit|anda)\b", re.I)),
+    ("AR", re.compile(r"[\u0600-\u06FF]")),
+    ("ZH", re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")),
+    ("RU", re.compile(r"[\u0400-\u04FF]")),
+    ("ES", re.compile(r"\b(código|verificación|ingresa|compartir|contraseña|minutos)\b", re.I)),
+    ("FR", re.compile(r"\b(code|vérification|entrez|partagez|valide|minutes)\b", re.I)),
+    ("PT", re.compile(r"\b(código|verificação|inserir|compartilhar|válido|minutos)\b", re.I)),
+    ("DE", re.compile(r"\b(code|verifizierung|eingeben|teilen|gültig|minuten)\b", re.I)),
+    ("TR", re.compile(r"\b(kod|doğrulama|girin|paylaşma|geçerli|dakika)\b", re.I)),
+    ("HI", re.compile(r"[\u0900-\u097F]")),
+    ("JA", re.compile(r"[\u3040-\u30FF\u31F0-\u31FF]")),
+    ("KO", re.compile(r"[\uAC00-\uD7AF\u1100-\u11FF]")),
+    ("TH", re.compile(r"[\u0E00-\u0E7F]")),
+    ("VI", re.compile(r"\b(mã|xác minh|nhập|chia sẻ|hợp lệ|phút)\b", re.I)),
+    # Default: EN (English)
+    ("EN", re.compile(r"\b(code|verify|enter|share|valid|minutes|otp|password)\b", re.I)),
+]
+
+def detect_sms_language(text: str) -> str:
+    """Deteksi bahasa teks SMS OTP. Return kode 2 huruf, default 'EN'."""
+    for lang_code, pattern in _LANG_RULES:
+        if pattern.search(text):
+            return lang_code
+    return "EN"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PHONE / COUNTRY HELPERS
@@ -556,38 +603,43 @@ def build_otp_message(
     country:     str,
     region_code: str,
     full_num:    str,
+    sms_text:    str = "",
 ) -> str:
     """
-    Format baru GARAGE OTP:
+    Format header GARAGE OTP:
+        🇮🇩 #ID WS +6288🗿0303 #EN
 
-        🇮🇩 #ID 💬 +6288🗿0303 #EN
-
-    Header ringkas satu baris. OTP ditampilkan di tombol inline keyboard.
+    - #{region_code} = kode negara (ID, EG, PE, ...)
+    - svc["code"]    = kode platform (WS, FB, IG, TG, OT, ...)
+    - #{lang}        = bahasa OTP yang terdeteksi (EN, ID, AR, ...)
+    OTP tampil di tombol keyboard, bukan di body pesan.
     """
     prefix, last4 = garage_mask_phone(full_num)
     masked_phone  = f"{prefix}🗿{last4}" if last4 else prefix
+    lang_code     = detect_sms_language(sms_text) if sms_text else "EN"
+    svc_code      = svc.get("code", "OT")
 
-    return (
-        f"{flag} #{region_code} {svc['icon']} {masked_phone} #EN"
-    )
+    return f"{flag} #{region_code} {svc_code} {masked_phone} #{lang_code}"
 
 def build_otp_keyboard(otp: str) -> dict:
     """
-    Inline keyboard GARAGE OTP:
-      Baris 1: [🔑 OTP_CODE]           (full width, copy_text)
-      Baris 2: [📱 NUMBER] [🔔 CHANNEL]
+    Inline keyboard style Mail_PG:
+      Baris 1 (HIJAU): [📋 OTP_CODE]       → copy_text (Telegram render hijau)
+      Baris 2 (BIRU):  [📱 NUMBER] [🔔 CHANNEL] → url (Telegram render biru)
     """
+    # Format OTP dengan tanda pisah: 738146 → 738-146
+    otp_display = f"{otp[:3]}-{otp[3:]}" if len(otp) == 6 else otp
     return {
         "inline_keyboard": [
             [
                 {
-                    "text":      f"🔑 {otp}",
+                    "text":      f"📋 {otp_display}",
                     "copy_text": {"text": otp},
                 }
             ],
             [
-                {"text": "📱 NUMBER",  "url": NUMBER_LINK},
-                {"text": "🔔 CHANNEL", "url": CHANNEL_LINK},
+                {"text": "📱 NUMBER ↗",  "url": NUMBER_LINK},
+                {"text": "🔔 CHANNEL ↗", "url": CHANNEL_LINK},
             ],
         ]
     }
@@ -865,28 +917,46 @@ def poll_one(acc) -> bool:
             clean = re.sub(r"\s+", " ", sms.replace("<#>", "")).strip()
             uid   = hashlib.md5(f"{num}-{clean}".encode()).hexdigest()
 
+            # ── BUG FIX: check + add harus ATOMIK dalam satu lock ─────────────
+            # Sebelumnya: check di luar, add di cache_add() setelah kirim
+            # → dua thread bisa lolos check sebelum salah satu nge-add → double send
             with _sent_cache_lock:
                 if uid in sent_cache:
                     continue
+                sent_cache.add(uid)   # ← tandai SEKARANG, sebelum kirim
+            global _cache_dirty
+            _cache_dirty = True
+            # ──────────────────────────────────────────────────────────────────
 
             matches = _OTP_RE.findall(sms)
             if not matches:
+                # Bukan OTP — hapus lagi dari cache supaya tidak terlewat jika nanti ada OTP
+                with _sent_cache_lock:
+                    sent_cache.discard(uid)
                 continue
 
             otp                        = re.sub(r"[^0-9]", "", matches[0])
             svc                        = detect_service(sms)
             country, flag, region_code = detect_country_and_flag(full_num, fallback_country)
 
-            # [FIX 4] Format pesan GARAGE OTP (header ringkas, OTP di tombol)
-            msg = build_otp_message(otp, svc, flag, country, region_code, full_num)
+            # Format header GARAGE OTP + deteksi bahasa SMS
+            msg = build_otp_message(otp, svc, flag, country, region_code, full_num, sms)
             tg_send_otp(otp, msg)
-            cache_add(uid)
+
+            # Pastikan cache ter-flush ke disk secara berkala
+            if time.time() - _last_cache_save >= 5:
+                with _sent_cache_lock:
+                    save_sent_cache_now(sent_cache)
+                global _last_cache_save
+                _last_cache_save = time.time()
+                _cache_dirty     = False
 
             _, last4 = garage_mask_phone(full_num)
+            lang     = detect_sms_language(sms)
             _log(
                 "OTP",
-                f"{svc['icon']} {svc['name']:<10}  {flag} #{region_code}  "
-                f"+{full_num[:4]}🗿{last4}  →  {otp}",
+                f"{svc['icon']} {svc['code']:<3}  {flag} #{region_code}  "
+                f"+{full_num[:4]}🗿{last4}  →  {otp}  #{lang}",
                 Fore.GREEN,
             )
             local_found = True
