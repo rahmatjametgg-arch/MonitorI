@@ -676,6 +676,7 @@ def save_sent_cache_now(cache: set):
 sent_cache = load_sent_cache()
 
 def cache_add(uid: str):
+    """Tambah uid ke cache tanpa pengecekan duplikat (tidak thread-safe untuk check-and-add)."""
     global _cache_dirty, _last_cache_save
     with _sent_cache_lock:
         sent_cache.add(uid)
@@ -685,6 +686,26 @@ def cache_add(uid: str):
             save_sent_cache_now(sent_cache)
         _last_cache_save = time.time()
         _cache_dirty = False
+
+def cache_try_add(uid: str) -> bool:
+    """
+    ATOMIC check-and-add: cek apakah uid sudah ada, jika belum langsung tambahkan.
+    Return True  = uid baru, pesan boleh dikirim.
+    Return False = uid sudah ada, SKIP (mencegah double-send).
+    Seluruh operasi di dalam satu lock → tidak ada race condition.
+    """
+    global _cache_dirty, _last_cache_save
+    with _sent_cache_lock:
+        if uid in sent_cache:
+            return False          # sudah ada → jangan kirim
+        sent_cache.add(uid)       # tambahkan SEKARANG dalam lock yang sama
+    _cache_dirty = True
+    if time.time() - _last_cache_save >= 5:
+        with _sent_cache_lock:
+            save_sent_cache_now(sent_cache)
+        _last_cache_save = time.time()
+        _cache_dirty = False
+    return True                   # baru → aman dikirim
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # GROUP TARGETS
@@ -917,22 +938,14 @@ def poll_one(acc) -> bool:
             clean = re.sub(r"\s+", " ", sms.replace("<#>", "")).strip()
             uid   = hashlib.md5(f"{num}-{clean}".encode()).hexdigest()
 
-            # ── BUG FIX: check + add harus ATOMIK dalam satu lock ─────────────
-            # Sebelumnya: check di luar, add di cache_add() setelah kirim
-            # → dua thread bisa lolos check sebelum salah satu nge-add → double send
-            with _sent_cache_lock:
-                if uid in sent_cache:
-                    continue
-                sent_cache.add(uid)   # ← tandai SEKARANG, sebelum kirim
-            global _cache_dirty
-            _cache_dirty = True
-            # ──────────────────────────────────────────────────────────────────
-
+            # Pastikan ada OTP dulu sebelum masuk cache
             matches = _OTP_RE.findall(sms)
             if not matches:
-                # Bukan OTP — hapus lagi dari cache supaya tidak terlewat jika nanti ada OTP
-                with _sent_cache_lock:
-                    sent_cache.discard(uid)
+                continue
+
+            # ATOMIC check-and-add via cache_try_add() (top-level fn, bukan nested global)
+            # Return False = sudah ada di cache → skip (mencegah double-send)
+            if not cache_try_add(uid):
                 continue
 
             otp                        = re.sub(r"[^0-9]", "", matches[0])
@@ -942,14 +955,6 @@ def poll_one(acc) -> bool:
             # Format header GARAGE OTP + deteksi bahasa SMS
             msg = build_otp_message(otp, svc, flag, country, region_code, full_num, sms)
             tg_send_otp(otp, msg)
-
-            # Pastikan cache ter-flush ke disk secara berkala
-            if time.time() - _last_cache_save >= 5:
-                with _sent_cache_lock:
-                    save_sent_cache_now(sent_cache)
-                global _last_cache_save
-                _last_cache_save = time.time()
-                _cache_dirty     = False
 
             _, last4 = garage_mask_phone(full_num)
             lang     = detect_sms_language(sms)
@@ -1149,6 +1154,8 @@ signal.signal(signal.SIGINT,  _shutdown)
 # MAIN
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def main():
+    global _cache_dirty, _last_cache_save
+
     print(Fore.CYAN + Style.BRIGHT, end="")
     print("  ╔══════════════════════════════════════╗")
     print("  ║   🕷  SPIDERMAT OTP BOT              ║")
@@ -1156,9 +1163,23 @@ def main():
     print("  ╚══════════════════════════════════════╝")
     print(Style.RESET_ALL)
 
+    # ── LANGKAH 1: Health server SELALU start duluan ─────────────────────────
+    # Railway healthcheck akan gagal jika server belum bind saat check dimulai.
+    # Dengan start di sini, /health tetap merespons meski inisialisasi lainnya
+    # lambat atau gagal — Railway tidak akan force-kill deployment karena timeout.
+    hs_thread = threading.Thread(target=run_health_server, daemon=True, name="health")
+    hs_thread.start()
+    time.sleep(0.3)   # beri sedikit waktu agar socket bind selesai
+    _log("SERVER", "Health server aktif — Railway healthcheck siap", Fore.GREEN)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    # ── LANGKAH 2: Validasi env vars ─────────────────────────────────────────
     if not BOT_TOKEN:
         _log("FATAL", "BOT_TOKEN belum diset! Set via environment variable.", Fore.RED)
-        sys.exit(1)
+        # Jangan sys.exit() — biarkan health server tetap jalan agar Railway
+        # tidak langsung hapus deployment. Loop tanpa henti agar tidak crash.
+        while True:
+            time.sleep(60)
 
     if IVAS_USERNAME and IVAS_PASSWORD:
         _log("LOGIN", f"Auto-login aktif: {IVAS_USERNAME}", Fore.GREEN)
@@ -1167,10 +1188,12 @@ def main():
 
     _load_groups()
 
+    # ── LANGKAH 3: Load cookies ───────────────────────────────────────────────
     cookies_list = load_cookies()
     if not cookies_list:
         _log("FATAL", f"Tidak ada cookie valid di {COOKIE_FILE}. Isi dulu!", Fore.RED)
-        sys.exit(1)
+        while True:   # health server tetap hidup
+            time.sleep(60)
 
     accounts = []
     for idx, ck in enumerate(cookies_list):
@@ -1194,7 +1217,7 @@ def main():
     _log("CONFIG", f"SMS thread max   →  3 per range",                   Fore.CYAN)
     print()
 
-    threading.Thread(target=run_health_server,                  daemon=True, name="health").start()
+    # ── LANGKAH 4: Start thread-thread background ─────────────────────────────
     threading.Thread(target=tg_update_listener,                 daemon=True, name="cmd-listener").start()
     threading.Thread(target=keepalive_worker, args=(accounts,), daemon=True, name="keepalive").start()
 
@@ -1208,7 +1231,7 @@ def main():
     print()
     _log("CONFIG", "Bot berjalan. Ketik /addbot di grup untuk mendaftarkan.", Fore.CYAN)
 
-    global _cache_dirty, _last_cache_save
+    # ── LANGKAH 5: Main thread — flush cache periodik ─────────────────────────
     while True:
         if _cache_dirty and time.time() - _last_cache_save >= 5:
             with _sent_cache_lock:
