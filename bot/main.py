@@ -94,9 +94,12 @@ def _log(tag, msg, color=Fore.CYAN):
     print(color + f"  {ts}  {label}  {msg}" + Style.RESET_ALL, flush=True)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# WORKER POOL  (proxy fallback jika kena rate-limit)
+# WORKER POOL  (urutan: direct URL dulu, proxy sebagai fallback)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ivasms.com HARUS di index 0 — ini URL yang pasti jalan karena cookie user
+# langsung valid di sana. Proxy di bawahnya sebagai fallback jika direct kena limit.
 WORKER_POOL = [
+    "https://ivasms.com",                                         # ← PRIMARY (direct)
     "https://plain-butterfly-d9e9.kicenivas.workers.dev",
     "https://ivasmunchen.serverprivate1.web.id",
     "https://ivasmsbykicenv2.kikixrakaofficial.biz.id",
