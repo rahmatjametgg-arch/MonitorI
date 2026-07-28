@@ -121,6 +121,19 @@ def _all_workers_limited() -> bool:
     with _worker_lock:
         return all(_worker_limited_until.get(w, 0) >= now for w in WORKER_POOL)
 
+def _soonest_worker_free_in() -> float:
+    """
+    Return detik hingga worker pertama keluar cooldown.
+    Return 0.0 jika sudah ada worker yang bebas sekarang.
+    """
+    now = time.time()
+    with _worker_lock:
+        free = [w for w in WORKER_POOL if _worker_limited_until.get(w, 0) < now]
+        if free:
+            return 0.0
+        earliest = min(_worker_limited_until.get(w, 0) for w in WORKER_POOL)
+        return max(0.0, earliest - now + 1.5)   # +1.5s buffer
+
 def mark_worker_limited(url):
     global _active_worker_idx
     now = time.time()
@@ -1006,6 +1019,11 @@ def poll_one(acc) -> bool:
         # Selalu sekuensial + jeda antar nomor agar tidak burst request ke server
         # ThreadPoolExecutor dihapus — concurrent request = penyebab utama 429
         for n in numbers:
+            # FIX: jika semua worker kena rate-limit di tengah poll, stop langsung
+            # daripada terus request nomor berikutnya yang pasti juga gagal
+            if _all_workers_limited():
+                _log("RANGE", f"akun #{acc['idx']}: semua worker limited di tengah poll — berhenti", Fore.YELLOW)
+                break
             try:
                 if process_number(rng, n, fallback_country, code):
                     found = True
@@ -1020,8 +1038,25 @@ def poll_one(acc) -> bool:
 # [FIX 1 + 2] ACCOUNT WORKER  — min sleep 5s jika idle
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def account_worker(acc):
-    sleep_time = MIN_IDLE_SLEEP
+    sleep_time  = MIN_IDLE_SLEEP
+    _last_all_limited_log = 0.0   # throttle log spam
+
     while True:
+        # ── FIX: cek cooldown SEBELUM masuk poll ──────────────────────────────
+        # Masalah lama: bot retry tiap 15s meski semua worker masih cooldown 90s
+        # → spamming log "semua worker kena rate-limit" tanpa guna, malah makin
+        #   cepat kena block lagi. Sekarang: tidur persis sampai worker pertama bebas.
+        wait = _soonest_worker_free_in()
+        if wait > 0:
+            now = time.time()
+            if now - _last_all_limited_log >= 60:   # log maks 1x per menit
+                _log("WORKER", f"akun #{acc['idx']}: semua worker cooldown — tidur {wait:.0f}s", Fore.YELLOW)
+                _last_all_limited_log = now
+            time.sleep(wait)
+            sleep_time = MIN_IDLE_SLEEP   # reset setelah keluar cooldown
+            continue
+        # ──────────────────────────────────────────────────────────────────────
+
         try:
             found = poll_one(acc)
             if found:
