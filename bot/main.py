@@ -55,8 +55,8 @@ GROUPS_FILE        = "file/groups.json"
 MAX_CACHE          = 2000
 
 # [FIX 1] POLL_INTERVAL_MAX dinaikkan ke 12 detik (bukan 3)
-POLL_INTERVAL_MAX  = 12.0   # detik — jeda maks saat tidak ada OTP baru
-MIN_IDLE_SLEEP     = 5.0    # detik — minimum sleep jika tidak ada SMS baru
+POLL_INTERVAL_MAX  = 45.0   # detik — jeda maks saat tidak ada OTP baru
+MIN_IDLE_SLEEP     = 15.0   # detik — minimum sleep jika tidak ada SMS baru
 
 KEEPALIVE_INTERVAL = 480    # detik — ping /portal tiap 8 menit
 
@@ -112,17 +112,28 @@ def get_base():
     with _worker_lock:
         return WORKER_POOL[_active_worker_idx % len(WORKER_POOL)]
 
+def _all_workers_limited() -> bool:
+    """True jika semua worker sedang dalam cooldown (tidak ada yang bebas)."""
+    now = time.time()
+    with _worker_lock:
+        return all(_worker_limited_until.get(w, 0) >= now for w in WORKER_POOL)
+
 def mark_worker_limited(url):
     global _active_worker_idx
     now = time.time()
+    switched = False
     with _worker_lock:
         _worker_limited_until[url] = now + WORKER_LIMIT_COOLDOWN
         for i in range(1, len(WORKER_POOL) + 1):
             idx = (_active_worker_idx + i) % len(WORKER_POOL)
             if _worker_limited_until.get(WORKER_POOL[idx], 0) < now:
                 _active_worker_idx = idx
+                switched = True
                 break
-    _log("WORKER", f"rate-limited → pindah ke {get_base()}", Fore.YELLOW)
+    if switched:
+        _log("WORKER", f"rate-limited → pindah ke {get_base()}", Fore.YELLOW)
+    else:
+        _log("WORKER", "semua worker kena rate-limit — tunggu cooldown", Fore.RED)
 
 _RATE_LIMIT_MARKERS = (
     "temporarily rate limited", "error 1027", "please check back later",
@@ -365,8 +376,13 @@ def get_ranges(acc, _retry=0):
         data={"_token": csrf, "from": today, "to": today},
         headers=_recv_headers(base),
     )
-    if is_worker_blocked(r) and _retry < len(WORKER_POOL) - 1:
+    if is_worker_blocked(r):
         mark_worker_limited(worker_before)
+        if _all_workers_limited() or _retry >= len(WORKER_POOL) - 1:
+            _log("RANGE", "semua worker limited — skip poll ini", Fore.RED)
+            entry = _ranges_cache.get(acc["idx"])
+            return entry[1] if entry else []
+        time.sleep(4 * (_retry + 1))   # 4s, 8s, 12s … sebelum retry
         return get_ranges(acc, _retry + 1)
     if r.status_code == 429:
         _ranges_429_until[idx] = now + 180
@@ -412,8 +428,11 @@ def get_numbers(acc, rng, _retry=0):
         data={"_token": csrf, "start": today, "end": today, "range": rng},
         headers=_recv_headers(base),
     )
-    if is_worker_blocked(r) and _retry < len(WORKER_POOL) - 1:
+    if is_worker_blocked(r):
         mark_worker_limited(worker_before)
+        if _all_workers_limited() or _retry >= len(WORKER_POOL) - 1:
+            return []
+        time.sleep(4 * (_retry + 1))
         return get_numbers(acc, rng, _retry + 1)
     if r.status_code == 429:
         return []
@@ -440,8 +459,11 @@ def get_sms(acc, rng, number, _retry=0):
         data={"_token": csrf, "start": today, "end": today, "Number": number, "Range": rng},
         headers=_recv_headers(base),
     )
-    if is_worker_blocked(r) and _retry < len(WORKER_POOL) - 1:
+    if is_worker_blocked(r):
         mark_worker_limited(worker_before)
+        if _all_workers_limited() or _retry >= len(WORKER_POOL) - 1:
+            return []
+        time.sleep(4 * (_retry + 1))
         return get_sms(acc, rng, number, _retry + 1)
     if r.status_code == 429:
         return []
@@ -978,25 +1000,16 @@ def poll_one(acc) -> bool:
         if not numbers:
             continue
 
-        # [FIX 1] Kurangi thread dari max 20 → max 3 agar tidak spam request (HTTP 429)
-        n_workers = min(3, len(numbers))
-        if n_workers == 1:
-            # Sekuensial jika hanya 1 nomor
-            for n in numbers:
-                try:
-                    if process_number(rng, n, fallback_country, code):
-                        found = True
-                except Exception as e:
-                    _log("NUM", f"akun #{acc['idx']}: {e}", Fore.YELLOW)
-        else:
-            with ThreadPoolExecutor(max_workers=n_workers, thread_name_prefix="sms") as pool:
-                futs = {pool.submit(process_number, rng, n, fallback_country, code): n for n in numbers}
-                for fut in as_completed(futs):
-                    try:
-                        if fut.result():
-                            found = True
-                    except Exception as e:
-                        _log("NUM", f"akun #{acc['idx']}: {e}", Fore.YELLOW)
+        # Selalu sekuensial + jeda antar nomor agar tidak burst request ke server
+        # ThreadPoolExecutor dihapus — concurrent request = penyebab utama 429
+        for n in numbers:
+            try:
+                if process_number(rng, n, fallback_country, code):
+                    found = True
+            except Exception as e:
+                _log("NUM", f"akun #{acc['idx']}: {e}", Fore.YELLOW)
+            # Jeda kecil antar nomor agar tidak langsung request berikutnya
+            time.sleep(1.5)
 
     return found
 
