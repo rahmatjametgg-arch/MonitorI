@@ -106,7 +106,7 @@ WORKER_POOL = [
 _worker_lock          = threading.Lock()
 _active_worker_idx    = 0
 _worker_limited_until = {}
-WORKER_LIMIT_COOLDOWN = 900   # 15 menit
+WORKER_LIMIT_COOLDOWN = 90    # 90 detik — cukup untuk recover, tidak terlalu lama
 
 def get_base():
     with _worker_lock:
@@ -1050,25 +1050,40 @@ def keepalive_worker(accounts):
             if now - _last_keepalive.get(idx, 0) < KEEPALIVE_INTERVAL:
                 continue
 
-            session_ok = False
-            for _ in range(len(WORKER_POOL)):
-                base = get_base()
+            # ── Coba satu per satu worker, TANPA mark_worker_limited() ──────
+            # Keepalive tidak berhak merusak worker pool global — penalti 90s
+            # hanya dilakukan oleh get_ranges/get_numbers/get_sms saat polling.
+            # Tugas keepalive: cek apakah session masih hidup, bukan rate test.
+            session_ok    = False
+            all_blocked   = True   # True selama semua worker kasih rate-limit
+            login_expired = False  # True hanya jika benar-benar dapat /login redirect
+
+            # Kumpulkan urutan worker yang tersedia (yang tidak sedang cooldown)
+            now_ts       = time.time()
+            free_workers = [w for w in WORKER_POOL
+                            if _worker_limited_until.get(w, 0) < now_ts]
+            # Jika semua sedang cooldown, tetap coba satu (yang paling dekat expire)
+            if not free_workers:
+                free_workers = sorted(WORKER_POOL,
+                                      key=lambda w: _worker_limited_until.get(w, 0))[:1]
+
+            for base in free_workers:
                 try:
                     r = acc["session"].get(f"{base}/portal", timeout=15)
                     if is_worker_blocked(r):
-                        _log("KEEPALIVE", f"worker rate-limited ({base}), pindah...", Fore.YELLOW)
-                        mark_worker_limited(base)
+                        # Worker ini memang blocked — catat tapi JANGAN mark_worker_limited
+                        # (biarkan mekanisme poll yang handle penalti worker)
                         continue
+                    all_blocked = False   # ada worker yang merespons normal
                     if r.status_code == 200 and "/login" not in str(r.url):
                         _recv_csrf_cache.pop(idx, None)
                         _log("KA-OK", f"akun #{idx} — session aktif ✓", Fore.GREEN)
-                        # Session pulih → reset flag notif agar bisa kirim lagi di masa depan
                         _session_expired_sent[idx] = False
                         session_ok = True
                         break
                     if "/login" in str(r.url):
-                        # [FIX 2] Coba auto-login langsung
-                        _log("KEEPALIVE", f"akun #{idx}: session expired, coba auto-login...", Fore.YELLOW)
+                        login_expired = True
+                        _log("KEEPALIVE", f"akun #{idx}: redirect /login — coba auto-login...", Fore.YELLOW)
                         login_ok = auto_login_ivas(acc)
                         if login_ok:
                             _recv_csrf_cache.pop(idx, None)
@@ -1078,16 +1093,22 @@ def keepalive_worker(accounts):
                         break
                 except Exception as e:
                     _log("KA-ERR", f"{base}: {e}", Fore.YELLOW)
-                    mark_worker_limited(base)
 
-            if not session_ok:
+            # ── Evaluasi hasil ──────────────────────────────────────────────
+            if session_ok:
+                pass  # sudah di-log di atas
+            elif all_blocked:
+                # Semua worker sedang kena rate-limit → ini BUKAN session expired
+                # Bot tidak bisa verifikasi, jadi diam saja (jangan spam Telegram)
+                _log("KEEPALIVE", f"akun #{idx}: semua proxy busy (rate-limit) — skip cek session", Fore.YELLOW)
+            elif login_expired and not session_ok:
+                # Benar-benar session expired + auto-login gagal → baru notif
                 _log(
                     "KA-WARN",
-                    f"akun #{idx} — session tidak bisa dipulihkan. "
+                    f"akun #{idx} — session expired & auto-login gagal. "
                     f"Periksa IVAS_USERNAME/IVAS_PASSWORD atau perbarui cookie.json.",
                     Fore.YELLOW,
                 )
-                # [FIX 3] Kirim notif ke Telegram HANYA 1x per siklus kegagalan
                 already_sent = _session_expired_sent.get(idx, False)
                 if not already_sent and OWNER_ID and OWNER_ID != DEFAULT_TARGET:
                     try:
@@ -1104,7 +1125,7 @@ def keepalive_worker(accounts):
                     except Exception as e:
                         _log("KA-ERR", f"gagal kirim notif Telegram: {e}", Fore.RED)
                 elif already_sent:
-                    _log("KA-WARN", f"akun #{idx}: notif sudah dikirim sebelumnya, skip", Fore.YELLOW)
+                    _log("KA-WARN", f"akun #{idx}: notif sudah dikirim, skip", Fore.YELLOW)
 
             _last_keepalive[idx] = now
             time.sleep(2)
