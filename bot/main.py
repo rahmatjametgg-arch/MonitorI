@@ -9,12 +9,14 @@ Perbaikan v2.0:
   3. Notifikasi SESSION EXPIRED ke Telegram hanya 1x per kegagalan
   4. Format pesan Telegram baru: GARAGE OTP UI
 
-Patch v2.2 (anti-delay fix):
-  FIX-16: POLL_INTERVAL_MAX turun 120s → 30s
-  FIX-17: MIN_IDLE_SLEEP turun 30s → 5s
-  FIX-18: WORKER_STAGGER_DELAY turun 15s → 3s per akun
-  FIX-19: Saat OTP ditemukan → sleep 3s (bukan MIN_IDLE_SLEEP 30s)
-  FIX-20: Jitter dikecilkan ±5s → ±1s
+Patch v2.3 (anti-spam + anti-delay + time-filter):
+  FIX-16: Semua TRACE log dihapus — log bersih, hanya event penting
+  FIX-17: RAW HTML snippet log dihapus — tidak spam log
+  FIX-18: MIN_IDLE_SLEEP=12s, POLL_INTERVAL_MAX=60s — tidak spam IVAS
+  FIX-19: MAX_SMS_AGE_MINUTES=30 — OTP > 30 menit lalu di-skip, cegah kirim ulang pasca restart
+  FIX-20: Jitter ±2s, found → sleep 5s, idle backoff +2s/iter
+  FIX-21: WORKER_STAGGER_DELAY=5s per akun
+  FIX-22: Jeda 2s antar request nomor dalam satu range (anti-burst)
 
 Patch v2.1 (bugfix — lihat AUDIT.md untuk penjelasan lengkap):
   FIX-01: Stagger startup + jitter sleep antar akun
@@ -80,13 +82,17 @@ CACHE_FILE         = "file/sent_cache.json"
 GROUPS_FILE        = "file/groups.json"
 MAX_CACHE          = 2000
 
-POLL_INTERVAL_MAX    = 30.0   # detik — jeda maks saat tidak ada OTP baru
-MIN_IDLE_SLEEP       = 5.0    # detik — minimum sleep antar poll
+POLL_INTERVAL_MAX    = 30.0   # detik — jeda maks (OTP paling telat 30s terdeteksi)
+MIN_IDLE_SLEEP       = 10.0   # detik — minimum sleep antar poll
 KEEPALIVE_INTERVAL   = 480    # detik — ping /portal tiap 8 menit
 WORKER_LIMIT_COOLDOWN = 120   # detik — cooldown per worker setelah kena rate-limit
 
-# FIX-01: jeda antar akun saat startup agar tidak burst bersamaan
-WORKER_STAGGER_DELAY = 3.0    # detik — 0s, 3s, 6s, 9s per akun
+# jeda antar akun saat startup agar tidak burst bersamaan
+WORKER_STAGGER_DELAY = 5.0    # detik — 0s, 5s, 10s, 15s per akun
+
+# hanya OTP yang diterima dalam N menit terakhir yang diproses
+# mencegah OTP lama dikirim ulang saat bot restart
+MAX_SMS_AGE_MINUTES  = 30
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # LOGGING
@@ -275,9 +281,9 @@ _login_result = {}   # idx -> bool
 def _get_login_csrf(session, base) -> str:
     """Ambil CSRF token dari halaman /login."""
     try:
-        _log("TRACE", f"GET {base}/login — ambil CSRF login", Fore.WHITE)
+        pass  # login attempt
         r = session.get(f"{base}/login", timeout=15)
-        _log("TRACE", f"GET {base}/login → HTTP {r.status_code}", Fore.WHITE)
+        pass  # login response logged elsewhere
         soup = BeautifulSoup(r.text, "html.parser")
         meta = soup.find("meta", {"name": "csrf-token"})
         if meta and meta.get("content"):
@@ -403,10 +409,8 @@ def get_recv_csrf(acc, _retry=0) -> str:
     base     = get_base_for(acc)   # FIX-02: per-akun
     recv_url = f"{base}/portal/sms/received"
     try:
-        _log("TRACE", f"akun #{idx}: GET {recv_url} (ambil CSRF, retry={_retry})", Fore.WHITE)
         worker_before = base
         r = acc["session"].get(recv_url, timeout=15)
-        _log("TRACE", f"akun #{idx}: GET {recv_url} → HTTP {r.status_code}, url={r.url}", Fore.WHITE)
         if is_worker_blocked(r) and _retry < len(WORKER_POOL) - 1:
             _log("CSRF", f"akun #{idx}: worker {base} blocked, pindah ke worker berikutnya (retry={_retry})", Fore.YELLOW)
             mark_worker_limited_for(acc, worker_before)   # FIX-02
@@ -484,7 +488,7 @@ def get_ranges(acc):
         worker_before = base
 
         url = f"{base}/portal/sms/received/getsms"
-        _log("TRACE", f"akun #{idx}: POST {url} (attempt {attempt}, date={today})", Fore.WHITE)
+        # attempt {attempt}
         try:
             r = acc["session"].post(
                 url,
@@ -495,7 +499,7 @@ def get_ranges(acc):
             _log("RANGE", f"akun #{idx} attempt {attempt}: request error: {e}\n{traceback.format_exc()}", Fore.YELLOW)
             break
 
-        _log("TRACE", f"akun #{idx}: POST {url} → HTTP {r.status_code}, url={r.url}", Fore.WHITE)
+        pass
 
         if is_worker_blocked(r):
             _log("RANGE", f"akun #{idx}: worker {base} rate-limited (attempt {attempt})", Fore.YELLOW)
@@ -569,81 +573,84 @@ def _raw_snippet(html: str, max_chars: int = 1500) -> str:
         return html[:max_chars]
 
 
+def _is_sms_recent(time_str: str) -> bool:
+    """
+    Return True jika SMS diterima dalam MAX_SMS_AGE_MINUTES menit terakhir.
+    Mencegah OTP lama (sebelum restart/deploy) dikirim ulang.
+
+    PENTING: IVAS menyimpan timestamp dalam UTC.
+    Pakai datetime.utcnow() agar perbandingan tidak terpengaruh timezone lokal
+    (misal: WIB=UTC+7 yang akan bikin semua OTP terlihat 7 jam lebih tua).
+    """
+    try:
+        now_utc = datetime.utcnow()
+        sms_dt  = datetime.strptime(f"{now_utc.strftime('%Y-%m-%d')} {time_str}", "%Y-%m-%d %H:%M:%S")
+        age_sec = (now_utc - sms_dt).total_seconds()
+        if age_sec < -300:       # rollover tengah malam → koreksi +24 jam
+            age_sec += 86400
+        return 0 <= age_sec <= MAX_SMS_AGE_MINUTES * 60
+    except Exception:
+        return True              # gagal parse → loloskan (aman)
+
+
 def _parse_sms_texts(html_text: str, source_label: str = "") -> list:
     """
-    Ekstrak teks SMS dari HTML response IVAS.
+    Ekstrak teks SMS dari HTML IVAS, dengan filter waktu (MAX_SMS_AGE_MINUTES).
 
-    Filter yang diterapkan (dari yang paling spesifik ke umum):
-    - String kosong
-    - Pure token panjang tanpa spasi (CSRF/hash/base64)
-    - Label UI: sender, revenue, time, paid, unpaid, count
-    - Timestamp penuh HH:MM:SS
-    - String yang SELURUHNYA angka ≤4 digit (angka kolom Count/Paid/Unpaid)
-    - Desimal murni seperti "0.01", "0.05" (kolom Revenue)
-    - Kode mata uang murni: USD, EUR, IDR, dll.
-    - String yang mengandung "$"
-    - "No SMS Found"
-
-    FIX-09: fullmatch bukan search — hanya skip jika SELURUH baris adalah timestamp.
-    SMS OTP sering menyertakan waktu expire di baris yang sama dengan kode.
+    Strategi look-ahead: setiap token SMS diasosiasikan dengan timestamp HH:MM:SS
+    terdekat di depannya (≤3 token). Sesuai urutan kolom IVAS: sender|message|time.
+    SMS tanpa timestamp diloloskan (aman). SMS dengan timestamp lama di-skip.
     """
-    soup      = BeautifulSoup(html_text, "html.parser")
-    sms_texts = []
-    skipped   = 0
-    rejected  = []   # simpan yang di-reject untuk log diagnostik
+    soup = BeautifulSoup(html_text, "html.parser")
 
-    # Kode mata uang yang sering muncul sebagai nilai kolom Revenue
     _CURRENCY_CODES = {"USD", "EUR", "IDR", "GBP", "AUD", "JPY", "CNY", "BRL", "INR",
                        "MYR", "PHP", "THB", "VND", "KRW", "SGD", "HKD", "TWD"}
 
+    def _is_junk(t: str) -> bool:
+        if re.fullmatch(r"[A-Za-z0-9]{10,}", t):                              return True
+        if any(x in t.lower() for x in
+               ["sender", "revenue", "time", "paid", "unpaid", "count", "range"]): return True
+        if re.fullmatch(r"\d{1,4}", t.strip()):                               return True
+        if re.fullmatch(r"\d+\.\d+", t.strip()):                              return True
+        if t.strip().upper() in _CURRENCY_CODES:                              return True
+        if "$" in t:                                                          return True
+        if "No SMS Found" in t:                                               return True
+        return False
+
+    # Kumpulkan semua token dengan tipenya
+    tokens = []   # list of (text, "ts"|"sms"|"junk")
     try:
-        for t in soup.stripped_strings:
-            t = t.strip().replace("<#>", "").strip()
+        for raw in soup.stripped_strings:
+            t = raw.strip().replace("<#>", "").strip()
             if not t:
                 continue
-
-            reason = None
-
-            # Pure long alphanumeric token (CSRF, hash, base64) — tanpa spasi
-            if re.fullmatch(r"[A-Za-z0-9]{10,}", t):
-                reason = "token-panjang"
-            # Label kolom tabel UI IVAS
-            elif any(x in t.lower() for x in ["sender", "revenue", "time", "paid", "unpaid", "count", "range"]):
-                reason = f"label-ui({t.lower()[:20]})"
-            # Timestamp penuh HH:MM:SS
-            elif re.fullmatch(r"\d{2}:\d{2}:\d{2}", t.strip()):
-                reason = "timestamp"
-            # Angka murni pendek ≤4 digit — kolom Count/Paid/Unpaid
-            elif re.fullmatch(r"\d{1,4}", t.strip()):
-                reason = f"angka-pendek({t})"
-            # Angka desimal murni — kolom Revenue ("0.01", "1.23")
-            elif re.fullmatch(r"\d+\.\d+", t.strip()):
-                reason = f"desimal({t})"
-            # Kode mata uang murni
-            elif t.strip().upper() in _CURRENCY_CODES:
-                reason = f"mata-uang({t})"
-            # Mengandung simbol "$"
-            elif "$" in t:
-                reason = "dollar-sign"
-            # Pesan sistem IVAS
-            elif "No SMS Found" in t:
-                reason = "no-sms-found"
-
-            if reason:
-                skipped += 1
-                rejected.append(f"{t!r}({reason})")
-                continue
-
-            sms_texts.append(t)
-
+            if re.fullmatch(r"\d{2}:\d{2}:\d{2}", t):
+                tokens.append((t, "ts"))
+            elif _is_junk(t):
+                tokens.append((t, "junk"))
+            else:
+                tokens.append((t, "sms"))
     except Exception as e:
         _log("SMS", f"parse error: {e}\n{traceback.format_exc()}", Fore.RED)
 
-    result = list(dict.fromkeys(sms_texts))
-    lbl = f" [{source_label}]" if source_label else ""
-    _log("TRACE", f"_parse_sms_texts{lbl}: {len(result)} lolos, {skipped} dibuang → {rejected[:10]}", Fore.WHITE)
-    if result:
-        _log("TRACE", f"_parse_sms_texts{lbl}: teks yang lolos → {[s[:80] for s in result]}", Fore.WHITE)
+    # Pasangkan setiap SMS dengan timestamp terdekat di depannya (look-ahead ≤3)
+    result = []
+    seen   = set()
+    for i, (text, typ) in enumerate(tokens):
+        if typ != "sms":
+            continue
+        ts = ""
+        for j in range(i + 1, min(i + 4, len(tokens))):
+            if tokens[j][1] == "ts":
+                ts = tokens[j][0]
+                break
+        if ts and not _is_sms_recent(ts):
+            _log("SMS", f"SMS lama di-skip: {text[:50]!r} (waktu IVAS: {ts})", Fore.YELLOW)
+            continue
+        if text not in seen:
+            seen.add(text)
+            result.append(text)
+
     return result
 
 
@@ -719,19 +726,11 @@ def get_sms_for_number(acc, rng: str, number: str, base: str, csrf: str, today: 
         "Range":  rng,     # kapital R — IVAS case-sensitive di endpoint ini
         "Number": number,  # kapital N — lowercase menyebabkan response kosong → fallback HTML garbage
     }
-    _log("TRACE", f"akun #{idx}: POST {url} number={number!r} range={rng!r}", Fore.WHITE)
-
     try:
         r = acc["session"].post(url, data=payload, headers=_recv_headers(base), timeout=15)
     except Exception as e:
         _log("SMS", f"akun #{idx}: get_sms_for_number request error: {e}\n{traceback.format_exc()}", Fore.YELLOW)
         return []
-
-    _log("TRACE", f"akun #{idx}: /getsms/number/sms → HTTP {r.status_code} ({len(r.text)} byte)", Fore.WHITE)
-
-    # Log raw snippet — krusial untuk diagnosis
-    snippet = _raw_snippet(r.text, max_chars=1200)
-    _log("SMS", f"akun #{idx}: [/number/sms RAW] {snippet}", Fore.WHITE)
 
     if r.status_code in (404, 405, 500):
         _log("SMS", f"akun #{idx}: endpoint /number/sms tidak ada (HTTP {r.status_code}) — fallback ke parse number-list", Fore.YELLOW)
@@ -753,7 +752,7 @@ def get_sms_for_number(acc, rng: str, number: str, base: str, csrf: str, today: 
             # Cari field yang berisi HTML/teks
             for key in ("data", "html", "content", "message", "body", "sms", "text"):
                 if key in j and isinstance(j[key], str) and j[key].strip():
-                    _log("TRACE", f"akun #{idx}: /number/sms JSON field '{key}' ditemukan", Fore.WHITE)
+                    pass  # json field found
                     body = j[key]
                     break
     except Exception:
@@ -784,8 +783,6 @@ def get_numbers_and_otp(acc, rng, _retry=0) -> dict:
 
     # ── TAHAP 1: Ambil daftar nomor ──────────────────────────────────────────
     url_num = f"{base}/portal/sms/received/getsms/number"
-    _log("TRACE", f"akun #{idx}: [TAHAP-1] POST {url_num} range={rng!r} retry={_retry}", Fore.WHITE)
-
     try:
         r_num = acc["session"].post(
             url_num,
@@ -795,11 +792,6 @@ def get_numbers_and_otp(acc, rng, _retry=0) -> dict:
     except Exception as e:
         _log("NUM", f"akun #{idx}: [TAHAP-1] request error: {e}\n{traceback.format_exc()}", Fore.YELLOW)
         return {}
-
-    _log("TRACE", f"akun #{idx}: [TAHAP-1] → HTTP {r_num.status_code} ({len(r_num.text)} byte)", Fore.WHITE)
-
-    # Log cuplikan raw HTML agar debugging bisa dilakukan tanpa restart
-    _log("SMS", f"akun #{idx}: [TAHAP-1 RAW] {_raw_snippet(r_num.text, 1200)}", Fore.WHITE)
 
     if is_worker_blocked(r_num):
         _log("NUM", f"akun #{idx}: [TAHAP-1] worker {base} rate-limited (retry={_retry})", Fore.YELLOW)
@@ -833,25 +825,21 @@ def get_numbers_and_otp(acc, rng, _retry=0) -> dict:
     # ── TAHAP 2: Ambil teks SMS per nomor ────────────────────────────────────
     result: dict = {}
 
-    for number in numbers:
-        _log("SMS", f"akun #{idx}: [TAHAP-2] ambil SMS untuk nomor {number}", Fore.CYAN)
+    for i, number in enumerate(numbers):
+        # Jeda kecil antar request per nomor — cegah burst ke IVAS
+        if i > 0:
+            time.sleep(2)
 
         sms_texts = get_sms_for_number(acc, rng, number, base, csrf, today)
 
         if not sms_texts:
             # Fallback: coba parse teks dari halaman number-list itu sendiri
-            # (berguna jika /number/sms belum diimplementasi di worker proxy)
-            _log("SMS", f"akun #{idx}: [TAHAP-2] /number/sms kosong — coba fallback parse number-list HTML", Fore.YELLOW)
-            fallback = _parse_sms_texts(r_num.text, source_label=f"fallback:{number[-4:]}")
-            # Filter fallback: reject string yang terlalu pendek (noise tabel)
+            fallback  = _parse_sms_texts(r_num.text, source_label=f"fallback:{number[-4:]}")
             sms_texts = [t for t in fallback if len(t.split()) >= 3 or re.search(r"\d{4,}", t)]
             if sms_texts:
-                _log("SMS", f"akun #{idx}: [TAHAP-2] fallback berhasil: {len(sms_texts)} teks", Fore.YELLOW)
-            else:
-                _log("SMS", f"akun #{idx}: [TAHAP-2] fallback juga kosong untuk nomor {number}", Fore.RED)
+                _log("SMS", f"akun #{idx}: fallback berhasil: {len(sms_texts)} teks untuk {number}", Fore.YELLOW)
 
         result[number] = sms_texts
-        _log("SMS", f"akun #{idx}: nomor {number} → {len(sms_texts)} SMS teks", Fore.CYAN)
 
     return result
 
@@ -945,7 +933,7 @@ def detect_country_and_flag(full_num: str, fallback_country="UNKNOWN"):
             country_name = geocoder.description_for_number(parsed, "en")
             return (country_name.upper() if country_name else fallback_country), flag, region
     except Exception as e:
-        _log("TRACE", f"detect_country_and_flag({full_num!r}): {e}", Fore.WHITE)
+        pass
     return fallback_country, "🏳", "??"
 
 def parse_range(rng: str):
@@ -1244,10 +1232,8 @@ def tg_sender_worker():
 
         _log("OTP", f"[TG-SEND] uid={uid[:8]}… otp={otp} → {len(targets)} target", Fore.CYAN)
         for cid in targets:
-            _log("TRACE", f"[TG-SEND] sebelum kirim → chat_id={cid}", Fore.WHITE)
             ok = _tg_post(cid, msg_text, reply_markup=kb)
             if ok:
-                _log("TRACE", f"[TG-SEND] berhasil → chat_id={cid}", Fore.WHITE)
                 any_success = True
             else:
                 _log("TG-ERR", f"[TG-SEND] gagal → chat_id={cid}", Fore.RED)
@@ -1413,7 +1399,7 @@ def poll_one(acc) -> bool:
 
             full_num = normalize_number(num, code)
             if not full_num.isdigit():
-                _log("TRACE", f"akun #{idx}: nomor {num!r} diabaikan (bukan digit)", Fore.WHITE)
+                pass
                 continue
 
             _log("POLL", f"akun #{idx}: nomor +{full_num} — {len(sms_list)} SMS", Fore.WHITE)
@@ -1425,11 +1411,8 @@ def poll_one(acc) -> bool:
                 # tidak di-skip secara salah oleh dedup cache.
                 uid = hashlib.md5(f"{rng}:{clean}".encode()).hexdigest()
 
-                _log("TRACE", f"akun #{idx}: SMS uid={uid[:8]}… teks={clean[:60]!r}", Fore.WHITE)
-
-                matches = _OTP_RE.findall(sms)   # FIX-10: regex diperluas
+                matches = _OTP_RE.findall(sms)
                 if not matches:
-                    _log("TRACE", f"akun #{idx}: SMS uid={uid[:8]}… — tidak ada OTP ditemukan (skip)", Fore.WHITE)
                     continue
 
                 _log("POLL", f"akun #{idx}: SMS uid={uid[:8]}… — OTP candidates: {matches}", Fore.CYAN)
@@ -1437,7 +1420,7 @@ def poll_one(acc) -> bool:
                 # FIX-05: cek uid di cache + pending SEBELUM enqueue
                 # (tidak langsung add ke cache — cache hanya di-update setelah TG send berhasil)
                 if not _uid_reserve(uid):
-                    _log("TRACE", f"akun #{idx}: SMS uid={uid[:8]}… — sudah di cache/pending, SKIP", Fore.WHITE)
+                    pass
                     continue
 
                 _log("POLL", f"akun #{idx}: SMS uid={uid[:8]}… — OTP BARU, akan di-enqueue", Fore.GREEN)
@@ -1529,17 +1512,18 @@ def account_worker(acc):
             try:
                 found = poll_one(acc)
                 if found:
-                    # OTP ditemukan → poll ulang cepat, tanpa tunggu lama
-                    sleep_time = 3.0
+                    # OTP ditemukan → poll ulang cepat
+                    sleep_time = 5.0
                 else:
+                    # Backoff lambat: +1s per idle poll, max 30s
                     sleep_time = min(sleep_time + 1.0, POLL_INTERVAL_MAX)
             except Exception as e:
                 _log("WORKER", f"akun #{idx}: exception di poll_one: {e}\n{traceback.format_exc()}", Fore.RED)
                 sleep_time = min(sleep_time * 2, POLL_INTERVAL_MAX)
 
-            # Jitter kecil ±1 detik agar antar akun tidak sync persis
-            jitter       = random.uniform(-1.0, 1.0)
-            actual_sleep = max(3.0 if sleep_time <= 3.0 else MIN_IDLE_SLEEP, sleep_time + jitter)
+            # Jitter kecil ±2 detik agar antar akun tidak sync persis
+            jitter       = random.uniform(-2.0, 2.0)
+            actual_sleep = max(MIN_IDLE_SLEEP, sleep_time + jitter)
 
             _log("POLL", f"akun #{idx}: tidur {actual_sleep:.1f}s sebelum poll berikutnya", Fore.WHITE)
 
