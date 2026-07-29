@@ -27,7 +27,6 @@ Patch v2.1 (bugfix — lihat AUDIT.md untuk penjelasan lengkap):
   FIX-15: get_ranges iteratif — tidak ada blocking recursion dengan sleep
 """
 
-import httpx
 from bs4 import BeautifulSoup
 import re
 from datetime import datetime
@@ -246,13 +245,18 @@ def make_session(cookies: dict, timeout=30):
         "Origin":           "https://ivasms.com",
         "Referer":          "https://ivasms.com/",
     }
-    s = httpx.Client(
-        follow_redirects=True,
-        timeout=timeout,
-        headers=hdrs,
-        limits=httpx.Limits(max_connections=20, max_keepalive_connections=5),
+    # Ganti httpx.Client → requests.Session (httpx tidak diinstall di Railway)
+    s = requests.Session()
+    s.headers.update(hdrs)
+    adapter = requests.adapters.HTTPAdapter(
+        pool_connections=5,
+        pool_maxsize=20,
+        max_retries=0,
     )
-    s.cookies.update(cookies)
+    s.mount("https://", adapter)
+    s.mount("http://",  adapter)
+    for name, value in cookies.items():
+        s.cookies.set(name, value)
     return s
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -639,30 +643,46 @@ def _parse_sms_texts(html_text: str, source_label: str = "") -> list:
 def _extract_numbers_from_html(soup, rng: str) -> list:
     """
     Ekstrak daftar nomor telepon dari HTML response /getsms/number.
-    IVAS memakai onclick="toggleNumber('...') / getNumber('...') / showSms('...')" di div/tr/a.
-    Return: list of nomor string (belum dinormalisasi).
+
+    Strategi (berurutan dari paling andal ke fallback):
+    1. Generic onclick — split pada tanda kutip, ambil token ke-2 yang bukan rng
+       (sama persis dengan logika original yang terbukti jalan di IVAS)
+    2. Fungsi onclick spesifik IVAS (toggleNumber, getNumber, dll.)
+    3. Atribut data-number
     """
     numbers = []
     seen    = set()
 
-    # Coba beberapa pola onclick IVAS yang diketahui
-    _ONCLICK_FUNCS = ("toggleNumber", "getNumber", "showSms", "getSms", "loadSms", "clickNumber")
-
+    # ── Strategi 1: generic onclick (cara original yang terbukti jalan) ────────
     for tag in soup.find_all(onclick=True):
         onclick = tag.get("onclick", "")
-        for fn in _ONCLICK_FUNCS:
-            if fn in onclick:
-                # Ambil argumen pertama dari fungsi: fn('arg1', ...)
-                m = re.search(r"['\"]([^'\"]+)['\"]", onclick)
-                if m:
-                    val = m.group(1).strip()
-                    # Pastikan bukan range itu sendiri dan mengandung digit
-                    if val and val != rng and re.search(r"\d{5,}", val) and val not in seen:
-                        seen.add(val)
-                        numbers.append(val)
-                break
+        try:
+            parts = onclick.split("'")
+            if len(parts) >= 2:
+                val = parts[1].strip()
+                # Harus beda dari nama range, dan harus punya angka (nomor telepon)
+                if val and val != rng and re.search(r"\d{5,}", val) and val not in seen:
+                    seen.add(val)
+                    numbers.append(val)
+        except Exception:
+            pass
 
-    # Fallback: cari elemen dengan href atau data-number yang mirip nomor telepon
+    # ── Strategi 2: fungsi onclick IVAS spesifik (jika strategi 1 tidak cukup) ─
+    if not numbers:
+        _ONCLICK_FUNCS = ("toggleNumber", "getNumber", "showSms", "getSms", "loadSms", "clickNumber")
+        for tag in soup.find_all(onclick=True):
+            onclick = tag.get("onclick", "")
+            for fn in _ONCLICK_FUNCS:
+                if fn in onclick:
+                    m = re.search(r"['\"]([^'\"]+)['\"]", onclick)
+                    if m:
+                        val = m.group(1).strip()
+                        if val and val != rng and re.search(r"\d{5,}", val) and val not in seen:
+                            seen.add(val)
+                            numbers.append(val)
+                    break
+
+    # ── Strategi 3: data-number attribute ─────────────────────────────────────
     if not numbers:
         for tag in soup.find_all(True, {"data-number": True}):
             val = tag.get("data-number", "").strip()
@@ -689,8 +709,8 @@ def get_sms_for_number(acc, rng: str, number: str, base: str, csrf: str, today: 
         "_token": csrf,
         "start":  today,
         "end":    today,
-        "range":  rng,
-        "number": number,
+        "Range":  rng,     # kapital R — IVAS case-sensitive di endpoint ini
+        "Number": number,  # kapital N — lowercase menyebabkan response kosong → fallback HTML garbage
     }
     _log("TRACE", f"akun #{idx}: POST {url} number={number!r} range={rng!r}", Fore.WHITE)
 
@@ -1333,9 +1353,10 @@ def tg_update_listener():
 
 # FIX-10: diperluas — 4-digit, 6-digit (dengan/tanpa pemisah), 8-digit
 _OTP_RE = re.compile(
-    r"\b\d{3}[- ]?\d{3,5}\b"   # 6–8 digit dengan/tanpa pemisah
-    r"|\b\d{4}\b"               # 4 digit persis
-    r"|\b\d{8}\b"               # 8 digit persis
+    r"\b\d{3}[- ]?\d{3,5}\b"   # 6–8 digit dengan/tanpa pemisah (format OTP paling umum)
+    r"|\b\d{8}\b"               # 8 digit persis (OTP panjang)
+    # CATATAN: \b\d{4}\b dihapus — terlalu lebar, cocok dengan angka tabel/range
+    # seperti "4204" dari "EGYPT 4204" → menyebabkan "kode nuklir" terkirim
 )
 
 def poll_one(acc) -> bool:
