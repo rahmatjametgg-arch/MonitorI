@@ -1,5 +1,5 @@
 """
-SPIDERMAT OTP BOT — FORWARD MODE (PATCHED v2.1)
+SPIDERMAT OTP BOT — FORWARD MODE (PATCHED v2.2)
 Baca cookie dari cookie.json → poll IVAS → forward OTP ke Telegram.
 Command: /addbot /removebot /listbot
 
@@ -8,6 +8,13 @@ Perbaikan v2.0:
   2. Auto-login IVAS menggunakan IVAS_USERNAME + IVAS_PASSWORD
   3. Notifikasi SESSION EXPIRED ke Telegram hanya 1x per kegagalan
   4. Format pesan Telegram baru: GARAGE OTP UI
+
+Patch v2.2 (anti-delay fix):
+  FIX-16: POLL_INTERVAL_MAX turun 120s → 30s
+  FIX-17: MIN_IDLE_SLEEP turun 30s → 5s
+  FIX-18: WORKER_STAGGER_DELAY turun 15s → 3s per akun
+  FIX-19: Saat OTP ditemukan → sleep 3s (bukan MIN_IDLE_SLEEP 30s)
+  FIX-20: Jitter dikecilkan ±5s → ±1s
 
 Patch v2.1 (bugfix — lihat AUDIT.md untuk penjelasan lengkap):
   FIX-01: Stagger startup + jitter sleep antar akun
@@ -73,13 +80,13 @@ CACHE_FILE         = "file/sent_cache.json"
 GROUPS_FILE        = "file/groups.json"
 MAX_CACHE          = 2000
 
-POLL_INTERVAL_MAX    = 120.0  # detik — jeda maks saat tidak ada OTP baru
-MIN_IDLE_SLEEP       = 30.0   # detik — minimum sleep antar poll
+POLL_INTERVAL_MAX    = 30.0   # detik — jeda maks saat tidak ada OTP baru
+MIN_IDLE_SLEEP       = 5.0    # detik — minimum sleep antar poll
 KEEPALIVE_INTERVAL   = 480    # detik — ping /portal tiap 8 menit
 WORKER_LIMIT_COOLDOWN = 120   # detik — cooldown per worker setelah kena rate-limit
 
 # FIX-01: jeda antar akun saat startup agar tidak burst bersamaan
-WORKER_STAGGER_DELAY = 15.0   # detik — 0s, 15s, 30s, 45s per akun
+WORKER_STAGGER_DELAY = 3.0    # detik — 0s, 3s, 6s, 9s per akun
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # LOGGING
@@ -1522,16 +1529,17 @@ def account_worker(acc):
             try:
                 found = poll_one(acc)
                 if found:
-                    sleep_time = MIN_IDLE_SLEEP
+                    # OTP ditemukan → poll ulang cepat, tanpa tunggu lama
+                    sleep_time = 3.0
                 else:
                     sleep_time = min(sleep_time + 1.0, POLL_INTERVAL_MAX)
             except Exception as e:
                 _log("WORKER", f"akun #{idx}: exception di poll_one: {e}\n{traceback.format_exc()}", Fore.RED)
                 sleep_time = min(sleep_time * 2, POLL_INTERVAL_MAX)
 
-            # FIX-01: jitter ±5 detik agar pola periodik antar akun tidak terbentuk
-            jitter       = random.uniform(-5.0, 5.0)
-            actual_sleep = max(MIN_IDLE_SLEEP, sleep_time + jitter)
+            # Jitter kecil ±1 detik agar antar akun tidak sync persis
+            jitter       = random.uniform(-1.0, 1.0)
+            actual_sleep = max(3.0 if sleep_time <= 3.0 else MIN_IDLE_SLEEP, sleep_time + jitter)
 
             _log("POLL", f"akun #{idx}: tidur {actual_sleep:.1f}s sebelum poll berikutnya", Fore.WHITE)
 
