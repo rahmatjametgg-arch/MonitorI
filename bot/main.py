@@ -543,103 +543,288 @@ def get_ranges_cached(acc):
             return cached
     return get_ranges(acc)
 
-def _parse_sms_texts(html_text: str) -> list:
+def _raw_snippet(html: str, max_chars: int = 1500) -> str:
+    """
+    Kembalikan cuplikan teks bersih dari HTML untuk logging diagnostik.
+    Strip tag HTML lalu potong agar tidak membanjiri log.
+    """
+    try:
+        clean = re.sub(r"<[^>]+>", " ", html)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        if len(clean) <= max_chars:
+            return clean
+        return clean[:max_chars] + f"… [+{len(clean) - max_chars} karakter dipotong]"
+    except Exception:
+        return html[:max_chars]
+
+
+def _parse_sms_texts(html_text: str, source_label: str = "") -> list:
     """
     Ekstrak teks SMS dari HTML response IVAS.
-    FIX-09: filter timestamp diperbaiki — hanya skip baris yang SELURUHNYA adalah
-    timestamp (fullmatch), bukan baris yang mengandung timestamp.
+
+    Filter yang diterapkan (dari yang paling spesifik ke umum):
+    - String kosong
+    - Pure token panjang tanpa spasi (CSRF/hash/base64)
+    - Label UI: sender, revenue, time, paid, unpaid, count
+    - Timestamp penuh HH:MM:SS
+    - String yang SELURUHNYA angka ≤4 digit (angka kolom Count/Paid/Unpaid)
+    - Desimal murni seperti "0.01", "0.05" (kolom Revenue)
+    - Kode mata uang murni: USD, EUR, IDR, dll.
+    - String yang mengandung "$"
+    - "No SMS Found"
+
+    FIX-09: fullmatch bukan search — hanya skip jika SELURUH baris adalah timestamp.
     SMS OTP sering menyertakan waktu expire di baris yang sama dengan kode.
     """
     soup      = BeautifulSoup(html_text, "html.parser")
     sms_texts = []
     skipped   = 0
+    rejected  = []   # simpan yang di-reject untuk log diagnostik
+
+    # Kode mata uang yang sering muncul sebagai nilai kolom Revenue
+    _CURRENCY_CODES = {"USD", "EUR", "IDR", "GBP", "AUD", "JPY", "CNY", "BRL", "INR",
+                       "MYR", "PHP", "THB", "VND", "KRW", "SGD", "HKD", "TWD"}
+
     try:
         for t in soup.stripped_strings:
             t = t.strip().replace("<#>", "").strip()
             if not t:
                 continue
+
+            reason = None
+
+            # Pure long alphanumeric token (CSRF, hash, base64) — tanpa spasi
             if re.fullmatch(r"[A-Za-z0-9]{10,}", t):
+                reason = "token-panjang"
+            # Label kolom tabel UI IVAS
+            elif any(x in t.lower() for x in ["sender", "revenue", "time", "paid", "unpaid", "count", "range"]):
+                reason = f"label-ui({t.lower()[:20]})"
+            # Timestamp penuh HH:MM:SS
+            elif re.fullmatch(r"\d{2}:\d{2}:\d{2}", t.strip()):
+                reason = "timestamp"
+            # Angka murni pendek ≤4 digit — kolom Count/Paid/Unpaid
+            elif re.fullmatch(r"\d{1,4}", t.strip()):
+                reason = f"angka-pendek({t})"
+            # Angka desimal murni — kolom Revenue ("0.01", "1.23")
+            elif re.fullmatch(r"\d+\.\d+", t.strip()):
+                reason = f"desimal({t})"
+            # Kode mata uang murni
+            elif t.strip().upper() in _CURRENCY_CODES:
+                reason = f"mata-uang({t})"
+            # Mengandung simbol "$"
+            elif "$" in t:
+                reason = "dollar-sign"
+            # Pesan sistem IVAS
+            elif "No SMS Found" in t:
+                reason = "no-sms-found"
+
+            if reason:
                 skipped += 1
+                rejected.append(f"{t!r}({reason})")
                 continue
-            t_low = t.lower()
-            if any(x in t_low for x in ["sender", "revenue", "time"]):
-                skipped += 1
-                continue
-            # FIX-09: fullmatch bukan search — hanya skip jika SELURUH baris adalah timestamp
-            if re.fullmatch(r"\d{2}:\d{2}:\d{2}", t.strip()):
-                skipped += 1
-                continue
-            if "$" in t:
-                skipped += 1
-                continue
-            if "No SMS Found" in t:
-                skipped += 1
-                continue
+
             sms_texts.append(t)
+
     except Exception as e:
         _log("SMS", f"parse error: {e}\n{traceback.format_exc()}", Fore.RED)
+
     result = list(dict.fromkeys(sms_texts))
-    _log("TRACE", f"_parse_sms_texts: {len(result)} teks lolos filter, {skipped} diabaikan", Fore.WHITE)
+    lbl = f" [{source_label}]" if source_label else ""
+    _log("TRACE", f"_parse_sms_texts{lbl}: {len(result)} lolos, {skipped} dibuang → {rejected[:10]}", Fore.WHITE)
+    if result:
+        _log("TRACE", f"_parse_sms_texts{lbl}: teks yang lolos → {[s[:80] for s in result]}", Fore.WHITE)
     return result
+
+
+def _extract_numbers_from_html(soup, rng: str) -> list:
+    """
+    Ekstrak daftar nomor telepon dari HTML response /getsms/number.
+    IVAS memakai onclick="toggleNumber('...') / getNumber('...') / showSms('...')" di div/tr/a.
+    Return: list of nomor string (belum dinormalisasi).
+    """
+    numbers = []
+    seen    = set()
+
+    # Coba beberapa pola onclick IVAS yang diketahui
+    _ONCLICK_FUNCS = ("toggleNumber", "getNumber", "showSms", "getSms", "loadSms", "clickNumber")
+
+    for tag in soup.find_all(onclick=True):
+        onclick = tag.get("onclick", "")
+        for fn in _ONCLICK_FUNCS:
+            if fn in onclick:
+                # Ambil argumen pertama dari fungsi: fn('arg1', ...)
+                m = re.search(r"['\"]([^'\"]+)['\"]", onclick)
+                if m:
+                    val = m.group(1).strip()
+                    # Pastikan bukan range itu sendiri dan mengandung digit
+                    if val and val != rng and re.search(r"\d{5,}", val) and val not in seen:
+                        seen.add(val)
+                        numbers.append(val)
+                break
+
+    # Fallback: cari elemen dengan href atau data-number yang mirip nomor telepon
+    if not numbers:
+        for tag in soup.find_all(True, {"data-number": True}):
+            val = tag.get("data-number", "").strip()
+            if val and re.fullmatch(r"\d{6,15}", val) and val not in seen:
+                seen.add(val)
+                numbers.append(val)
+
+    return numbers
+
+
+def get_sms_for_number(acc, rng: str, number: str, base: str, csrf: str, today: str) -> list:
+    """
+    Request KETIGA dalam pipeline IVAS: ambil teks SMS untuk satu nomor spesifik.
+
+    Endpoint: POST /portal/sms/received/getsms/number/sms
+    Params  : {_token, start, end, range, number}
+
+    Return: list of SMS teks (string).
+    Jika endpoint tidak ada atau kosong, return [].
+    """
+    idx = acc["idx"]
+    url = f"{base}/portal/sms/received/getsms/number/sms"
+    payload = {
+        "_token": csrf,
+        "start":  today,
+        "end":    today,
+        "range":  rng,
+        "number": number,
+    }
+    _log("TRACE", f"akun #{idx}: POST {url} number={number!r} range={rng!r}", Fore.WHITE)
+
+    try:
+        r = acc["session"].post(url, data=payload, headers=_recv_headers(base), timeout=15)
+    except Exception as e:
+        _log("SMS", f"akun #{idx}: get_sms_for_number request error: {e}\n{traceback.format_exc()}", Fore.YELLOW)
+        return []
+
+    _log("TRACE", f"akun #{idx}: /getsms/number/sms → HTTP {r.status_code} ({len(r.text)} byte)", Fore.WHITE)
+
+    # Log raw snippet — krusial untuk diagnosis
+    snippet = _raw_snippet(r.text, max_chars=1200)
+    _log("SMS", f"akun #{idx}: [/number/sms RAW] {snippet}", Fore.WHITE)
+
+    if r.status_code in (404, 405, 500):
+        _log("SMS", f"akun #{idx}: endpoint /number/sms tidak ada (HTTP {r.status_code}) — fallback ke parse number-list", Fore.YELLOW)
+        return []
+
+    if is_worker_blocked(r):
+        _log("SMS", f"akun #{idx}: /number/sms kena rate-limit", Fore.YELLOW)
+        return []
+
+    if "/login" in str(r.url):
+        _log("SMS", f"akun #{idx}: /number/sms redirect ke /login", Fore.YELLOW)
+        return []
+
+    # IVAS kadang return JSON {"data": "<html>..."} atau HTML langsung
+    body = r.text
+    try:
+        j = r.json()
+        if isinstance(j, dict):
+            # Cari field yang berisi HTML/teks
+            for key in ("data", "html", "content", "message", "body", "sms", "text"):
+                if key in j and isinstance(j[key], str) and j[key].strip():
+                    _log("TRACE", f"akun #{idx}: /number/sms JSON field '{key}' ditemukan", Fore.WHITE)
+                    body = j[key]
+                    break
+    except Exception:
+        pass   # bukan JSON — lanjut parse sebagai HTML
+
+    texts = _parse_sms_texts(body, source_label=f"number/sms:{number[-4:]}")
+
+    if not texts:
+        _log("SMS", f"akun #{idx}: /number/sms → tidak ada teks SMS ditemukan untuk nomor {number}", Fore.YELLOW)
+
+    return texts
 
 
 def get_numbers_and_otp(acc, rng, _retry=0) -> dict:
     """
-    Satu request ke /getsms/number — ambil daftar nomor DAN teks SMS sekaligus.
+    Pipeline dua-tahap:
+      1. POST /getsms/number          → daftar nomor di dalam range
+      2. POST /getsms/number/sms      → teks SMS per nomor
+
     Return: {number: [sms_text, ...]}
     Nomor tanpa SMS → value = []
     """
     idx           = acc["idx"]
-    base          = get_base_for(acc)   # FIX-02: per-akun
+    base          = get_base_for(acc)
     today         = datetime.now().strftime("%Y-%m-%d")
     csrf          = get_recv_csrf(acc)
     worker_before = base
-    url = f"{base}/portal/sms/received/getsms/number"
-    _log("TRACE", f"akun #{idx}: POST {url} range={rng!r} (retry={_retry})", Fore.WHITE)
+
+    # ── TAHAP 1: Ambil daftar nomor ──────────────────────────────────────────
+    url_num = f"{base}/portal/sms/received/getsms/number"
+    _log("TRACE", f"akun #{idx}: [TAHAP-1] POST {url_num} range={rng!r} retry={_retry}", Fore.WHITE)
+
     try:
-        r = acc["session"].post(
-            url,
+        r_num = acc["session"].post(
+            url_num,
             data={"_token": csrf, "start": today, "end": today, "range": rng},
             headers=_recv_headers(base),
         )
     except Exception as e:
-        _log("NUM", f"akun #{idx}: request error range={rng!r}: {e}\n{traceback.format_exc()}", Fore.YELLOW)
+        _log("NUM", f"akun #{idx}: [TAHAP-1] request error: {e}\n{traceback.format_exc()}", Fore.YELLOW)
         return {}
 
-    _log("TRACE", f"akun #{idx}: POST {url} → HTTP {r.status_code}, url={r.url}", Fore.WHITE)
+    _log("TRACE", f"akun #{idx}: [TAHAP-1] → HTTP {r_num.status_code} ({len(r_num.text)} byte)", Fore.WHITE)
 
-    if is_worker_blocked(r):
-        _log("NUM", f"akun #{idx}: worker {base} rate-limited pada range={rng!r} (retry={_retry})", Fore.YELLOW)
-        mark_worker_limited_for(acc, worker_before)   # FIX-02
-        if _all_workers_limited_for(acc) or _retry >= len(WORKER_POOL) - 1:   # FIX-02
-            _log("NUM", f"akun #{idx}: semua worker limited atau max retry — abort range={rng!r}", Fore.RED)
+    # Log cuplikan raw HTML agar debugging bisa dilakukan tanpa restart
+    _log("SMS", f"akun #{idx}: [TAHAP-1 RAW] {_raw_snippet(r_num.text, 1200)}", Fore.WHITE)
+
+    if is_worker_blocked(r_num):
+        _log("NUM", f"akun #{idx}: [TAHAP-1] worker {base} rate-limited (retry={_retry})", Fore.YELLOW)
+        mark_worker_limited_for(acc, worker_before)
+        if _all_workers_limited_for(acc) or _retry >= len(WORKER_POOL) - 1:
+            _log("NUM", f"akun #{idx}: [TAHAP-1] semua worker limited — abort", Fore.RED)
             return {}
         time.sleep(5 * (_retry + 1))
         return get_numbers_and_otp(acc, rng, _retry + 1)
-    if r.status_code == 429:
-        _log("NUM", f"akun #{idx}: HTTP 429 pada range={rng!r}", Fore.YELLOW)
-        mark_worker_limited_for(acc, worker_before)   # FIX-02
-        return {}
-    if _check_and_handle_login_redirect(r, acc):
-        _log("NUM", f"akun #{idx}: redirect /login pada range={rng!r}", Fore.YELLOW)
+
+    if r_num.status_code == 429:
+        _log("NUM", f"akun #{idx}: [TAHAP-1] HTTP 429", Fore.YELLOW)
+        mark_worker_limited_for(acc, worker_before)
         return {}
 
-    soup   = BeautifulSoup(r.text, "html.parser")
-    result = {}
+    if _check_and_handle_login_redirect(r_num, acc):
+        _log("NUM", f"akun #{idx}: [TAHAP-1] redirect /login", Fore.YELLOW)
+        return {}
 
-    for div in soup.find_all("div", onclick=True):
-        try:
-            val = div["onclick"].split("'")[1]
-            if val and val != rng:
-                result.setdefault(val, [])
-        except Exception:
-            pass
+    soup_num = BeautifulSoup(r_num.text, "html.parser")
 
-    all_texts = _parse_sms_texts(r.text)
-    _log("SMS", f"akun #{idx}: range={rng!r} → {len(result)} nomor, {len(all_texts)} teks SMS unik", Fore.CYAN)
+    # Ekstrak nomor dari HTML (multi-pola onclick)
+    numbers = _extract_numbers_from_html(soup_num, rng)
 
-    for num in result:
-        result[num] = all_texts
+    if not numbers:
+        _log("NUM", f"akun #{idx}: [TAHAP-1] tidak ada nomor ditemukan di range={rng!r}", Fore.YELLOW)
+        return {}
+
+    _log("NUM", f"akun #{idx}: [TAHAP-1] {len(numbers)} nomor ditemukan: {numbers}", Fore.CYAN)
+
+    # ── TAHAP 2: Ambil teks SMS per nomor ────────────────────────────────────
+    result: dict = {}
+
+    for number in numbers:
+        _log("SMS", f"akun #{idx}: [TAHAP-2] ambil SMS untuk nomor {number}", Fore.CYAN)
+
+        sms_texts = get_sms_for_number(acc, rng, number, base, csrf, today)
+
+        if not sms_texts:
+            # Fallback: coba parse teks dari halaman number-list itu sendiri
+            # (berguna jika /number/sms belum diimplementasi di worker proxy)
+            _log("SMS", f"akun #{idx}: [TAHAP-2] /number/sms kosong — coba fallback parse number-list HTML", Fore.YELLOW)
+            fallback = _parse_sms_texts(r_num.text, source_label=f"fallback:{number[-4:]}")
+            # Filter fallback: reject string yang terlalu pendek (noise tabel)
+            sms_texts = [t for t in fallback if len(t.split()) >= 3 or re.search(r"\d{4,}", t)]
+            if sms_texts:
+                _log("SMS", f"akun #{idx}: [TAHAP-2] fallback berhasil: {len(sms_texts)} teks", Fore.YELLOW)
+            else:
+                _log("SMS", f"akun #{idx}: [TAHAP-2] fallback juga kosong untuk nomor {number}", Fore.RED)
+
+        result[number] = sms_texts
+        _log("SMS", f"akun #{idx}: nomor {number} → {len(sms_texts)} SMS teks", Fore.CYAN)
 
     return result
 
