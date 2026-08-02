@@ -1,19 +1,20 @@
 """
-SPIDERMAT OTP BOT — FORWARD MODE (REFACTORED)
-Baca cookie dari cookie.json → poll IVAS → forward OTP ke Telegram.
+SPIDERMAT OTP BOT — FORWARD MODE v3.0
+Baca cookie dari cookie.json → poll IVAS live endpoint → forward OTP ke Telegram.
 Command: /addbot /removebot /listbot
 
-Perbaikan:
-  1. Rate-limit fix: POLL_INTERVAL_MAX=12s, min sleep 5s, max_workers=3
-  2. Auto-login IVAS menggunakan IVAS_USERNAME + IVAS_PASSWORD
-  3. Notifikasi SESSION EXPIRED ke Telegram hanya 1x per kegagalan
-  4. Format pesan Telegram baru: GARAGE OTP UI
+Changelog v3.0:
+  - Live endpoint: GET /portal/live/my_sms (1 request/siklus, bukan range→number→SMS)
+  - Speed: found→sleep 3s, idle backoff mulai 5s max 20s
+  - Time filter: skip OTP > 30 menit (UTC-aware, cegah resend pasca restart)
+  - Pesan baru: card style + custom emoji WhatsApp Telegram
+  - Session stabil: keepalive, auto-login, rate-limit cooldown 15 menit
 """
 
 import httpx
 from bs4 import BeautifulSoup
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 import time
 import threading
 import json
@@ -21,7 +22,8 @@ import os
 import hashlib
 import signal
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import queue
+from concurrent.futures import ThreadPoolExecutor
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import requests
@@ -36,29 +38,29 @@ init(autoreset=True)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CONFIG
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-BOT_TOKEN  = os.getenv("BOT_TOKEN", "")        # wajib diset via env var
+BOT_TOKEN  = os.getenv("BOT_TOKEN", "")
 OWNER_ID   = int(os.getenv("OWNER_ID", "0"))
 
-# Kredensial IVAS untuk auto-login (anti session expired)
 IVAS_USERNAME = os.getenv("IVAS_USERNAME", "")
 IVAS_PASSWORD = os.getenv("IVAS_PASSWORD", "")
 
-# Grup default yang SELALU menerima OTP
 DEFAULT_TARGET = -1003686221386
 
 CHANNEL_LINK = "https://t.me/matchaappp"
 NUMBER_LINK  = "https://t.me/matchaappp"
 
-COOKIE_FILE        = "cookie.json"
-CACHE_FILE         = "file/sent_cache.json"
-GROUPS_FILE        = "file/groups.json"
-MAX_CACHE          = 2000
+COOKIE_FILE  = "cookie.json"
+CACHE_FILE   = "file/sent_cache.json"
+GROUPS_FILE  = "file/groups.json"
+MAX_CACHE    = 2000
 
-# [FIX 1] POLL_INTERVAL_MAX dinaikkan ke 12 detik (bukan 3)
-POLL_INTERVAL_MAX  = 45.0   # detik — jeda maks saat tidak ada OTP baru
-MIN_IDLE_SLEEP     = 15.0   # detik — minimum sleep jika tidak ada SMS baru
+# ── Timing ────────────────────────────────────────────────────────────────────
+POLL_FOUND_SLEEP   = 3.0    # detik — jeda setelah OTP ditemukan (jangan 0 biar session aman)
+MIN_IDLE_SLEEP     = 5.0    # detik — jeda minimum saat tidak ada SMS baru
+POLL_INTERVAL_MAX  = 20.0   # detik — jeda maksimum idle
 
-KEEPALIVE_INTERVAL = 480    # detik — ping /portal tiap 8 menit
+MAX_SMS_AGE_MINUTES = 30    # OTP lebih tua dari ini langsung di-skip
+KEEPALIVE_INTERVAL  = 480   # detik — ping /portal tiap 8 menit
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # LOGGING
@@ -85,6 +87,7 @@ _LOG_ICONS = {
     "CMD":      "⌨️ ",
     "GROUP":    "👥",
     "LOGIN":    "🔐",
+    "POLL":     "🔍",
 }
 
 def _log(tag, msg, color=Fore.CYAN):
@@ -113,14 +116,13 @@ def get_base():
         return WORKER_POOL[_active_worker_idx % len(WORKER_POOL)]
 
 def _all_workers_limited() -> bool:
-    """True jika semua worker sedang dalam cooldown (tidak ada yang bebas)."""
     now = time.time()
     with _worker_lock:
         return all(_worker_limited_until.get(w, 0) >= now for w in WORKER_POOL)
 
 def mark_worker_limited(url):
     global _active_worker_idx
-    now = time.time()
+    now     = time.time()
     switched = False
     with _worker_lock:
         _worker_limited_until[url] = now + WORKER_LIMIT_COOLDOWN
@@ -137,8 +139,8 @@ def mark_worker_limited(url):
 
 _RATE_LIMIT_MARKERS = (
     "temporarily rate limited", "error 1027", "please check back later",
-    "has been rate limited", "error 1015", "you have been blocked",
-    "attention required", "error 1020", "checking your browser", "just a moment",
+    "has been rate limited",    "error 1015", "you have been blocked",
+    "attention required",       "error 1020", "checking your browser", "just a moment",
 )
 
 def is_worker_blocked(resp) -> bool:
@@ -149,20 +151,13 @@ def is_worker_blocked(resp) -> bool:
             return True
         sample = resp.text[:2000].lower()
         return any(m in sample for m in _RATE_LIMIT_MARKERS)
-    except:
+    except Exception:
         return False
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # COOKIE LOADING
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def load_cookies():
-    """
-    Format yang didukung:
-      1. [{"name":"k","value":"v"}, ...]          — array browser export
-      2. {"email": {"laravel_session": "x"}, ...} — multi-akun per email
-      3. {"laravel_session": "x", ...}            — flat single akun
-    Return: list of cookie-dict (satu dict per akun).
-    """
     if not os.path.exists(COOKIE_FILE):
         _log("COOKIE", f"{COOKIE_FILE} tidak ditemukan!", Fore.RED)
         return []
@@ -204,15 +199,14 @@ def make_session(cookies: dict, timeout=30):
     return s
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# [FIX 2] AUTO-LOGIN IVAS  (anti session expired)
+# AUTO-LOGIN IVAS  (anti session expired)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_login_lock   = {}   # idx -> threading.Lock()
-_login_result = {}   # idx -> bool (True = success)
+_login_lock   = {}
+_login_result = {}
 
 def _get_login_csrf(session, base) -> str:
-    """Ambil CSRF token dari halaman /login."""
     try:
-        r = session.get(f"{base}/login", timeout=15)
+        r    = session.get(f"{base}/login", timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
         meta = soup.find("meta", {"name": "csrf-token"})
         if meta and meta.get("content"):
@@ -228,42 +222,30 @@ def _get_login_csrf(session, base) -> str:
     return ""
 
 def auto_login_ivas(acc) -> bool:
-    """
-    Lakukan HTTP POST ke endpoint login IVAS menggunakan IVAS_USERNAME & IVAS_PASSWORD.
-    Perbarui cookie session di memori secara otomatis.
-    Return True jika berhasil login, False jika gagal.
-    """
     idx = acc["idx"]
     if not IVAS_USERNAME or not IVAS_PASSWORD:
-        _log("LOGIN", f"akun #{idx}: IVAS_USERNAME/IVAS_PASSWORD belum diset di env!", Fore.YELLOW)
+        _log("LOGIN", f"akun #{idx}: IVAS_USERNAME/IVAS_PASSWORD belum diset!", Fore.YELLOW)
         return False
 
-    # Cegah login bersamaan dari banyak thread untuk akun yang sama
     if idx not in _login_lock:
         _login_lock[idx] = threading.Lock()
     if not _login_lock[idx].acquire(blocking=False):
-        # Thread lain sedang login, tunggu selesai
         _login_lock[idx].acquire()
         _login_lock[idx].release()
         return _login_result.get(idx, False)
 
     try:
-        _log("LOGIN", f"akun #{idx}: mencoba auto-login sebagai {IVAS_USERNAME}...", Fore.YELLOW)
+        _log("LOGIN", f"akun #{idx}: auto-login sebagai {IVAS_USERNAME}...", Fore.YELLOW)
         base = get_base()
         csrf = _get_login_csrf(acc["session"], base)
         if not csrf:
-            _log("LOGIN", f"akun #{idx}: gagal dapat CSRF token login", Fore.RED)
+            _log("LOGIN", f"akun #{idx}: gagal dapat CSRF login", Fore.RED)
             _login_result[idx] = False
             return False
 
-        payload = {
-            "_token":   csrf,
-            "email":    IVAS_USERNAME,
-            "password": IVAS_PASSWORD,
-        }
         r = acc["session"].post(
             f"{base}/login",
-            data=payload,
+            data={"_token": csrf, "email": IVAS_USERNAME, "password": IVAS_PASSWORD},
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Referer":      f"{base}/login",
@@ -271,20 +253,16 @@ def auto_login_ivas(acc) -> bool:
             },
             timeout=20,
         )
-
         success = r.status_code == 200 and "/login" not in str(r.url)
         if success:
-            # Invalidate CSRF cache agar diambil ulang dengan session baru
             _recv_csrf_cache.pop(idx, None)
             _log("LOGIN", f"akun #{idx}: ✅ auto-login BERHASIL", Fore.GREEN)
         else:
             _log("LOGIN", f"akun #{idx}: ❌ auto-login GAGAL (url={r.url})", Fore.RED)
-
         _login_result[idx] = success
         return success
-
     except Exception as e:
-        _log("LOGIN", f"akun #{idx}: exception saat auto-login: {e}", Fore.RED)
+        _log("LOGIN", f"akun #{idx}: exception: {e}", Fore.RED)
         _login_result[idx] = False
         return False
     finally:
@@ -296,6 +274,15 @@ def auto_login_ivas(acc) -> bool:
 _recv_csrf_cache = {}
 RECV_CSRF_TTL    = 900
 
+def _recv_headers(base):
+    return {
+        "Accept":           "text/html,*/*;q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Content-Type":     "application/x-www-form-urlencoded; charset=UTF-8",
+        "Referer":          f"{base}/portal/sms/received",
+        "Origin":           "https://ivasms.com",
+    }
+
 def get_recv_csrf(acc, _retry=0) -> str:
     idx    = acc["idx"]
     now    = time.time()
@@ -305,13 +292,11 @@ def get_recv_csrf(acc, _retry=0) -> str:
     base     = get_base()
     recv_url = f"{base}/portal/sms/received"
     try:
-        worker_before = base
         r = acc["session"].get(recv_url, timeout=15)
         if is_worker_blocked(r) and _retry < len(WORKER_POOL) - 1:
-            mark_worker_limited(worker_before)
+            mark_worker_limited(base)
             return get_recv_csrf(acc, _retry + 1)
         if "/login" in str(r.url):
-            # Session expired → coba auto-login dulu
             if auto_login_ivas(acc):
                 return get_recv_csrf(acc, _retry)
             return acc.get("csrf_token", "")
@@ -329,7 +314,7 @@ def get_recv_csrf(acc, _retry=0) -> str:
             if m:
                 csrf = m.group(1)
         if csrf:
-            acc["csrf_token"] = csrf
+            acc["csrf_token"]     = csrf
             _recv_csrf_cache[idx] = {"csrf": csrf, "ts": now}
             return csrf
     except Exception as e:
@@ -337,187 +322,168 @@ def get_recv_csrf(acc, _retry=0) -> str:
     return acc.get("csrf_token", "")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# IVAS API  (ranges / numbers / sms)
+# TIME FILTER  — skip OTP lama (UTC-aware)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_ranges_cache     = {}   # idx -> (ts, list)
-_ranges_429_until = {}   # idx -> ts
-RANGES_CACHE_TTL  = 300  # 5 menit
-
-def _recv_headers(base):
-    return {
-        "Accept":           "text/html,*/*;q=0.01",
-        "X-Requested-With": "XMLHttpRequest",
-        "Content-Type":     "application/x-www-form-urlencoded; charset=UTF-8",
-        "Referer":          f"{base}/portal/sms/received",
-        "Origin":           "https://ivasms.com",
-    }
-
-def _check_and_handle_login_redirect(r, acc) -> bool:
-    """Return True jika response adalah redirect ke /login (session expired)."""
-    if "/login" in str(r.url):
-        idx = acc["idx"]
-        _log("WORKER", f"akun #{idx}: redirect ke /login, coba auto-login...", Fore.YELLOW)
-        auto_login_ivas(acc)
-        return True
-    return False
-
-def get_ranges(acc, _retry=0):
-    idx = acc["idx"]
-    now = time.time()
-    if now < _ranges_429_until.get(idx, 0):
-        entry = _ranges_cache.get(idx)
-        return entry[1] if entry else []
-    base          = get_base()
-    today         = datetime.now().strftime("%Y-%m-%d")
-    csrf          = get_recv_csrf(acc)
-    worker_before = base
-    r = acc["session"].post(
-        f"{base}/portal/sms/received/getsms",
-        data={"_token": csrf, "from": today, "to": today},
-        headers=_recv_headers(base),
-    )
-    if is_worker_blocked(r):
-        mark_worker_limited(worker_before)
-        if _all_workers_limited() or _retry >= len(WORKER_POOL) - 1:
-            _log("RANGE", "semua worker limited — skip poll ini", Fore.RED)
-            entry = _ranges_cache.get(acc["idx"])
-            return entry[1] if entry else []
-        time.sleep(4 * (_retry + 1))   # 4s, 8s, 12s … sebelum retry
-        return get_ranges(acc, _retry + 1)
-    if r.status_code == 429:
-        _ranges_429_until[idx] = now + 180
-        entry = _ranges_cache.get(idx)
-        _log("RANGE", f"akun #{idx} — 429, cooldown 3 menit, pakai cache lama", Fore.YELLOW)
-        return entry[1] if entry else []
-    if _check_and_handle_login_redirect(r, acc):
-        return []
-    soup   = BeautifulSoup(r.text, "html.parser")
-    ranges = []
-    for div in soup.find_all("div", onclick=True):
-        if "toggleRange" in div["onclick"]:
-            try:
-                ranges.append(div["onclick"].split("'")[1])
-            except:
-                pass
-    result = list(set(ranges))
-    _ranges_429_until.pop(idx, None)
-    if result:
-        _ranges_cache[idx] = (now, result)
-    return result
-
-def get_ranges_cached(acc):
-    idx  = acc["idx"]
-    now  = time.time()
-    if now < _ranges_429_until.get(idx, 0):
-        entry = _ranges_cache.get(idx)
-        return entry[1] if entry else []
-    entry = _ranges_cache.get(idx)
-    if entry:
-        ts, cached = entry
-        if now - ts < RANGES_CACHE_TTL:
-            return cached
-    return get_ranges(acc)
-
-def get_numbers(acc, rng, _retry=0):
-    base          = get_base()
-    today         = datetime.now().strftime("%Y-%m-%d")
-    csrf          = get_recv_csrf(acc)
-    worker_before = base
-    r = acc["session"].post(
-        f"{base}/portal/sms/received/getsms/number",
-        data={"_token": csrf, "start": today, "end": today, "range": rng},
-        headers=_recv_headers(base),
-    )
-    if is_worker_blocked(r):
-        mark_worker_limited(worker_before)
-        if _all_workers_limited() or _retry >= len(WORKER_POOL) - 1:
-            return []
-        time.sleep(4 * (_retry + 1))
-        return get_numbers(acc, rng, _retry + 1)
-    if r.status_code == 429:
-        return []
-    if _check_and_handle_login_redirect(r, acc):
-        return []
-    soup    = BeautifulSoup(r.text, "html.parser")
-    numbers = []
-    for div in soup.find_all("div", onclick=True):
-        try:
-            val = div["onclick"].split("'")[1]
-            if val and val != rng:
-                numbers.append(val)
-        except:
-            pass
-    return list(set(numbers))
-
-def get_sms(acc, rng, number, _retry=0):
-    base          = get_base()
-    today         = datetime.now().strftime("%Y-%m-%d")
-    csrf          = get_recv_csrf(acc)
-    worker_before = base
-    r = acc["session"].post(
-        f"{base}/portal/sms/received/getsms/number/sms",
-        data={"_token": csrf, "start": today, "end": today, "Number": number, "Range": rng},
-        headers=_recv_headers(base),
-    )
-    if is_worker_blocked(r):
-        mark_worker_limited(worker_before)
-        if _all_workers_limited() or _retry >= len(WORKER_POOL) - 1:
-            return []
-        time.sleep(4 * (_retry + 1))
-        return get_sms(acc, rng, number, _retry + 1)
-    if r.status_code == 429:
-        return []
-    if _check_and_handle_login_redirect(r, acc):
-        return []
-    soup      = BeautifulSoup(r.text, "html.parser")
-    sms_texts = []
+def _is_sms_recent(time_str: str) -> bool:
+    """
+    Return True jika SMS timestamp (HH:MM:SS UTC dari IVAS) <= MAX_SMS_AGE_MINUTES menit lalu.
+    Pakai UTC agar tidak salah karena timezone WIB vs UTC.
+    Jika tidak bisa parse → anggap baru (True) supaya tidak skip valid.
+    """
     try:
-        for t in soup.stripped_strings:
-            t = t.strip().replace("<#>", "").strip()
-            if re.fullmatch(r"[A-Za-z0-9]{10,}", t):
-                continue
-            t_low = t.lower()
-            if any(x in t_low for x in ["sender", "revenue", "time"]):
-                continue
-            if re.search(r"\b\d{2}:\d{2}:\d{2}\b", t):
-                continue
-            if "$" in t:
-                continue
-            if t and "No SMS Found" not in t:
-                sms_texts.append(t)
-    except Exception as e:
-        _log("SMS", f"parse error: {e}", Fore.RED)
-    return list(dict.fromkeys(sms_texts))
+        now_utc = datetime.now(timezone.utc)
+        h, m, s = map(int, time_str.strip().split(":"))
+        sms_utc = now_utc.replace(hour=h, minute=m, second=s, microsecond=0)
+        # Kalau timestamp di masa depan (overflow hari) → geser mundur 1 hari
+        if (sms_utc - now_utc).total_seconds() > 60:
+            from datetime import timedelta
+            sms_utc -= timedelta(days=1)
+        age_minutes = (now_utc - sms_utc).total_seconds() / 60
+        return age_minutes <= MAX_SMS_AGE_MINUTES
+    except Exception:
+        return True   # tidak bisa parse → anggap valid
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# PLATFORM DETECTION  (kode pendek teks untuk header pesan)
+# LIVE SMS ENDPOINT  — /portal/live/my_sms (1 request, semua nomor)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# "code" = teks pendek yang muncul di header: WS, FB, IG, dst.
+def _parse_live_response(r, idx: int) -> list:
+    """
+    Parse response GET /portal/live/my_sms.
+    Return: list of (full_number_str, sms_text, time_str_utc)
+    Handles: JSON array, JSON {data:[...]}, HTML table.
+    """
+    results = []
+
+    # ── Coba JSON ──────────────────────────────────────────────────────────────
+    try:
+        data  = r.json()
+        items = []
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            for k in ("data", "sms", "messages", "result", "items"):
+                if k in data and isinstance(data[k], list):
+                    items = data[k]
+                    break
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            num = str(
+                item.get("number") or item.get("phone") or
+                item.get("msisdn") or item.get("sender_number") or ""
+            ).strip().replace("+", "").replace(" ", "")
+            msg = str(
+                item.get("message") or item.get("sms") or
+                item.get("text")    or item.get("body") or ""
+            ).strip()
+            raw_ts   = str(item.get("time") or item.get("created_at") or item.get("received_at") or "")
+            ts_match = re.search(r"\d{2}:\d{2}:\d{2}", raw_ts)
+            ts       = ts_match.group(0) if ts_match else ""
+            if msg:
+                results.append((num, msg, ts))
+
+        if results:
+            return results
+    except Exception:
+        pass
+
+    # ── HTML table fallback ────────────────────────────────────────────────────
+    try:
+        soup = BeautifulSoup(r.text, "html.parser")
+        SKIP_WORDS = {"sender", "message", "number", "time", "range",
+                      "count", "paid", "unpaid", "revenue", "sms found"}
+        for row in soup.find_all("tr"):
+            cells = [td.get_text(separator=" ", strip=True) for td in row.find_all("td")]
+            if len(cells) < 2:
+                continue
+
+            number   = ""
+            sms_text = ""
+            time_str = ""
+
+            for cell in cells:
+                c = cell.replace("<#>", "").strip()
+                if not c:
+                    continue
+                if re.fullmatch(r"\d{2}:\d{2}:\d{2}", c):
+                    time_str = c
+                elif re.fullmatch(r"\+?\d{8,15}", c.replace(" ", "")):
+                    number = c.replace(" ", "").lstrip("+")
+                elif (len(c.split()) >= 2 or re.search(r"\d{4,}", c)) and \
+                     not any(x in c.lower() for x in SKIP_WORDS):
+                    sms_text = c
+
+            if sms_text:
+                results.append((number, sms_text, time_str))
+    except Exception as e:
+        _log("SMS", f"akun #{idx}: parse live HTML error: {e}", Fore.RED)
+
+    return results
+
+
+def get_live_sms(acc) -> list:
+    """
+    GET /portal/live/my_sms — satu request, semua SMS terbaru.
+    Return: list of (full_number, sms_text, time_str_utc)
+    Jauh lebih efisien dari pipeline range→number→sms.
+    """
+    idx  = acc["idx"]
+    base = get_base()
+    url  = f"{base}/portal/live/my_sms"
+
+    try:
+        r = acc["session"].get(url, headers=_recv_headers(base), timeout=15)
+    except Exception as e:
+        _log("SMS", f"akun #{idx}: get_live_sms error: {e}", Fore.YELLOW)
+        return []
+
+    if is_worker_blocked(r):
+        mark_worker_limited(base)
+        return []
+    if r.status_code == 429:
+        mark_worker_limited(base)
+        return []
+    if "/login" in str(r.url):
+        _log("WORKER", f"akun #{idx}: live/my_sms → /login, coba auto-login", Fore.YELLOW)
+        auto_login_ivas(acc)
+        return []
+
+    items = _parse_live_response(r, idx)
+    if items:
+        _log("POLL", f"akun #{idx}: live endpoint → {len(items)} SMS", Fore.CYAN)
+    return items
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PLATFORM / SERVICE DETECTION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# tg_emoji_id: custom emoji ID Telegram (LV6 group support)
+# Fallback ke icon jika ID tidak valid di client.
 SERVICE_INFO = {
-    "WHATSAPP":  {"icon": "💬",  "name": "WhatsApp",  "code": "WS"},
-    "TELEGRAM":  {"icon": "✈️",  "name": "Telegram",  "code": "TG"},
-    "GOOGLE":    {"icon": "🔍",  "name": "Google",    "code": "G" },
-    "FACEBOOK":  {"icon": "📘",  "name": "Facebook",  "code": "FB"},
-    "INSTAGRAM": {"icon": "📷",  "name": "Instagram", "code": "IG"},
-    "TIKTOK":    {"icon": "🎵",  "name": "TikTok",    "code": "TT"},
-    "GRAB":      {"icon": "🚗",  "name": "Grab",      "code": "GR"},
-    "GOJEK":     {"icon": "🛵",  "name": "Gojek",     "code": "GJ"},
-    "SHOPEE":    {"icon": "🟠",  "name": "Shopee",    "code": "SP"},
-    "TOKOPEDIA": {"icon": "🛍️", "name": "Tokopedia", "code": "TP"},
-    "PAYPAL":    {"icon": "🅿️",  "name": "PayPal",   "code": "PP"},
-    "TWITTER":   {"icon": "🐦",  "name": "Twitter",   "code": "TW"},
-    "AMAZON":    {"icon": "📦",  "name": "Amazon",    "code": "AMZ"},
-    "NETFLIX":   {"icon": "🎬",  "name": "Netflix",   "code": "NF"},
-    "APPLE":     {"icon": "🍎",  "name": "Apple",     "code": "APL"},
-    "MICROSOFT": {"icon": "🪟",  "name": "Microsoft", "code": "MS"},
-    "DISCORD":   {"icon": "🎮",  "name": "Discord",   "code": "DC"},
-    "SNAPCHAT":  {"icon": "👻",  "name": "Snapchat",  "code": "SC"},
-    "LINKEDIN":  {"icon": "💼",  "name": "LinkedIn",  "code": "LI"},
-    "BINANCE":   {"icon": "🪙",  "name": "Binance",   "code": "BNB"},
-    "BYBIT":     {"icon": "📊",  "name": "Bybit",     "code": "BB"},
-    "OKX":       {"icon": "💹",  "name": "OKX",       "code": "OKX"},
+    "WHATSAPP":  {"icon": "💬",  "name": "WhatsApp",  "code": "WS",  "tg_emoji_id": "5373123633519420602"},
+    "TELEGRAM":  {"icon": "✈️",  "name": "Telegram",  "code": "TG",  "tg_emoji_id": ""},
+    "GOOGLE":    {"icon": "🔍",  "name": "Google",    "code": "G",   "tg_emoji_id": ""},
+    "FACEBOOK":  {"icon": "📘",  "name": "Facebook",  "code": "FB",  "tg_emoji_id": ""},
+    "INSTAGRAM": {"icon": "📸",  "name": "Instagram", "code": "IG",  "tg_emoji_id": ""},
+    "TIKTOK":    {"icon": "🎵",  "name": "TikTok",    "code": "TT",  "tg_emoji_id": ""},
+    "GRAB":      {"icon": "🚗",  "name": "Grab",      "code": "GR",  "tg_emoji_id": ""},
+    "GOJEK":     {"icon": "🛵",  "name": "Gojek",     "code": "GJ",  "tg_emoji_id": ""},
+    "SHOPEE":    {"icon": "🟠",  "name": "Shopee",    "code": "SP",  "tg_emoji_id": ""},
+    "TOKOPEDIA": {"icon": "🛍️", "name": "Tokopedia", "code": "TP",  "tg_emoji_id": ""},
+    "PAYPAL":    {"icon": "🅿️",  "name": "PayPal",   "code": "PP",  "tg_emoji_id": ""},
+    "TWITTER":   {"icon": "🐦",  "name": "Twitter/X", "code": "TW",  "tg_emoji_id": ""},
+    "AMAZON":    {"icon": "📦",  "name": "Amazon",    "code": "AMZ", "tg_emoji_id": ""},
+    "NETFLIX":   {"icon": "🎬",  "name": "Netflix",   "code": "NF",  "tg_emoji_id": ""},
+    "APPLE":     {"icon": "🍎",  "name": "Apple",     "code": "APL", "tg_emoji_id": ""},
+    "MICROSOFT": {"icon": "🪟",  "name": "Microsoft", "code": "MS",  "tg_emoji_id": ""},
+    "DISCORD":   {"icon": "🎮",  "name": "Discord",   "code": "DC",  "tg_emoji_id": ""},
+    "SNAPCHAT":  {"icon": "👻",  "name": "Snapchat",  "code": "SC",  "tg_emoji_id": ""},
+    "LINKEDIN":  {"icon": "💼",  "name": "LinkedIn",  "code": "LI",  "tg_emoji_id": ""},
+    "BINANCE":   {"icon": "🪙",  "name": "Binance",   "code": "BNB", "tg_emoji_id": ""},
+    "BYBIT":     {"icon": "📊",  "name": "Bybit",     "code": "BB",  "tg_emoji_id": ""},
+    "OKX":       {"icon": "💹",  "name": "OKX",       "code": "OKX", "tg_emoji_id": ""},
 }
-_SVC_DEFAULT = {"icon": "💌", "name": "OTP", "code": "OT"}
+_SVC_DEFAULT = {"icon": "💌", "name": "OTP", "code": "OT", "tg_emoji_id": ""}
 
 _SVC_PATTERN = re.compile(
     r"(WhatsApp|Telegram|Google|Facebook|Instagram|TikTok|Grab|Gojek|Shopee|Tokopedia"
@@ -529,17 +495,24 @@ _SVC_PATTERN = re.compile(
 def detect_service(text: str) -> dict:
     m = _SVC_PATTERN.search(text)
     if m:
-        key = m.group(1).upper()
-        # Normalisasi beberapa variasi nama
-        key = key.replace("TWITTER", "TWITTER")
-        return SERVICE_INFO.get(key, _SVC_DEFAULT)
+        return SERVICE_INFO.get(m.group(1).upper(), _SVC_DEFAULT)
     return _SVC_DEFAULT
 
+def _svc_emoji_tag(svc: dict) -> str:
+    """
+    Return <tg-emoji> tag kalau ada emoji_id, fallback ke icon biasa.
+    Telegram custom emoji — bisa dipakai di grup LV6+.
+    """
+    eid  = svc.get("tg_emoji_id", "")
+    icon = svc.get("icon", "💌")
+    if eid:
+        return f'<tg-emoji emoji-id="{eid}">{icon}</tg-emoji>'
+    return icon
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# LANGUAGE DETECTION  (dari isi teks SMS OTP)
+# LANGUAGE DETECTION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 _LANG_RULES = [
-    # (kode_bahasa, pattern_regex)
     ("ID", re.compile(r"\b(kode|verifikasi|masukkan|jangan|bagikan|konfirmasi|berlaku|menit|anda)\b", re.I)),
     ("AR", re.compile(r"[\u0600-\u06FF]")),
     ("ZH", re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")),
@@ -554,12 +527,10 @@ _LANG_RULES = [
     ("KO", re.compile(r"[\uAC00-\uD7AF\u1100-\u11FF]")),
     ("TH", re.compile(r"[\u0E00-\u0E7F]")),
     ("VI", re.compile(r"\b(mã|xác minh|nhập|chia sẻ|hợp lệ|phút)\b", re.I)),
-    # Default: EN (English)
     ("EN", re.compile(r"\b(code|verify|enter|share|valid|minutes|otp|password)\b", re.I)),
 ]
 
 def detect_sms_language(text: str) -> str:
-    """Deteksi bahasa teks SMS OTP. Return kode 2 huruf, default 'EN'."""
     for lang_code, pattern in _LANG_RULES:
         if pattern.search(text):
             return lang_code
@@ -571,7 +542,7 @@ def detect_sms_language(text: str) -> str:
 def code_to_flag(code: str) -> str:
     try:
         return "".join(chr(127397 + ord(c)) for c in code.upper())
-    except:
+    except Exception:
         return "🏳"
 
 def detect_country_and_flag(full_num: str, fallback_country="UNKNOWN"):
@@ -582,17 +553,9 @@ def detect_country_and_flag(full_num: str, fallback_country="UNKNOWN"):
             flag         = code_to_flag(region)
             country_name = geocoder.description_for_number(parsed, "en")
             return (country_name.upper() if country_name else fallback_country), flag, region
-    except:
+    except Exception:
         pass
     return fallback_country, "🏳", "??"
-
-def parse_range(rng: str):
-    country    = re.sub(r"\s*\(.*?\)", "", rng)
-    country    = re.sub(r"\d+", "", country)
-    country    = re.sub(r"\s+", " ", country).strip().upper()
-    code_match = re.search(r"\((\d+)\)", rng)
-    code       = code_match.group(1) if code_match else ""
-    return country, code
 
 def normalize_number(num: str, country_code: str) -> str:
     num = str(num).strip().replace(" ", "").replace("-", "").replace("+", "")
@@ -603,20 +566,14 @@ def normalize_number(num: str, country_code: str) -> str:
     return num
 
 def garage_mask_phone(full_num: str) -> tuple:
-    """
-    Kembalikan (prefix, last4) untuk format GARAGE OTP.
-    Contoh: '628812340303' → ('+6288', '0303')
-    """
+    """'628812340303' → ('+6288', '0303')"""
     n = str(full_num).replace("+", "").replace(" ", "")
     if len(n) >= 8:
-        # Tampilkan 4 digit awal setelah +, sembunyikan tengah, tampilkan 4 digit akhir
-        prefix = "+" + n[:4]
-        last4  = n[-4:]
-        return prefix, last4
+        return "+" + n[:4], n[-4:]
     return "+" + n, ""
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# [FIX 4] MESSAGE BUILDER  — GARAGE OTP Format
+# MESSAGE BUILDER  — Card style dengan custom emoji
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def build_otp_message(
     otp:         str,
@@ -628,46 +585,61 @@ def build_otp_message(
     sms_text:    str = "",
 ) -> str:
     """
-    Format header GARAGE OTP:
-        🇮🇩 #ID WS +6288🗿0303 #EN
+    Format card OTP — bersih dan cepat dibaca:
 
-    - #{region_code} = kode negara (ID, EG, PE, ...)
-    - svc["code"]    = kode platform (WS, FB, IG, TG, OT, ...)
-    - #{lang}        = bahasa OTP yang terdeteksi (EN, ID, AR, ...)
-    OTP tampil di tombol keyboard, bukan di body pesan.
+        💬 WhatsApp  ·  🇧🇯 Benin
+        📱 +2290🗿4704  ·  #BJ  #FR
+
+    OTP muncul di tombol inline keyboard (copy_text hijau).
+    Custom emoji WhatsApp via <tg-emoji> untuk grup LV6.
     """
     prefix, last4 = garage_mask_phone(full_num)
-    masked_phone  = f"{prefix}🗿{last4}" if last4 else prefix
-    lang_code     = detect_sms_language(sms_text) if sms_text else "EN"
-    svc_code      = svc.get("code", "OT")
+    masked        = f"{prefix}🗿{last4}" if last4 else prefix
+    lang          = detect_sms_language(sms_text) if sms_text else "EN"
+    svc_em        = _svc_emoji_tag(svc)
+    svc_name      = svc.get("name", "OTP")
 
-    return f"{flag} #{region_code} {svc_code} {masked_phone} #{lang_code}"
+    line1 = f"{svc_em} <b>{svc_name}</b>  ·  {flag} {country.title()}"
+    line2 = f"📱 <code>{masked}</code>  ·  #{region_code}  #{lang}"
 
-def build_otp_keyboard(otp: str) -> dict:
+    return f"{line1}\n{line2}"
+
+
+def build_otp_keyboard(otp: str, sms_text: str = "") -> dict:
     """
-    Inline keyboard style Mail_PG:
-      Baris 1 (HIJAU): [📋 OTP_CODE]       → copy_text (Telegram render hijau)
-      Baris 2 (BIRU):  [📱 NUMBER] [🔔 CHANNEL] → url (Telegram render biru)
+    Keyboard 3-baris:
+      Baris 1 (HIJAU, full-width): [📋 OTP] — copy_text
+      Baris 2 (BIRU, setengah):    [📱 NUMBER] [🔔 CHANNEL]
+
+    OTP 6 digit: tampil sebagai 738-146
+    OTP 8 digit: tampil sebagai 7381-4690
+    OTP lain: tampil apa adanya
     """
-    # Format OTP dengan tanda pisah: 738146 → 738-146
-    otp_display = f"{otp[:3]}-{otp[3:]}" if len(otp) == 6 else otp
+    n = len(otp)
+    if n == 6:
+        display = f"{otp[:3]}-{otp[3:]}"
+    elif n == 8:
+        display = f"{otp[:4]}-{otp[4:]}"
+    else:
+        display = otp
+
     return {
         "inline_keyboard": [
             [
                 {
-                    "text":      f"📋 {otp_display}",
+                    "text":      f"📋  {display}",
                     "copy_text": {"text": otp},
                 }
             ],
             [
-                {"text": "📱 NUMBER ↗",  "url": NUMBER_LINK},
-                {"text": "🔔 CHANNEL ↗", "url": CHANNEL_LINK},
+                {"text": "📱 NUMBER",  "url": NUMBER_LINK},
+                {"text": "🔔 CHANNEL", "url": CHANNEL_LINK},
             ],
         ]
     }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SENT CACHE  (dedup agar OTP tidak terkirim dua kali)
+# SENT CACHE  (dedup — OTP tidak dikirim dua kali)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 _sent_cache_lock = threading.Lock()
 _cache_dirty     = False
@@ -681,7 +653,7 @@ def load_sent_cache() -> set:
         with open(CACHE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             return set(data) if isinstance(data, list) else set()
-    except:
+    except Exception:
         return set()
 
 def save_sent_cache_now(cache: set):
@@ -697,10 +669,12 @@ def save_sent_cache_now(cache: set):
 
 sent_cache = load_sent_cache()
 
-def cache_add(uid: str):
-    """Tambah uid ke cache tanpa pengecekan duplikat (tidak thread-safe untuk check-and-add)."""
+def cache_try_add(uid: str) -> bool:
+    """Atomic check-and-add. True = baru (boleh kirim), False = duplikat (skip)."""
     global _cache_dirty, _last_cache_save
     with _sent_cache_lock:
+        if uid in sent_cache:
+            return False
         sent_cache.add(uid)
     _cache_dirty = True
     if time.time() - _last_cache_save >= 5:
@@ -708,32 +682,13 @@ def cache_add(uid: str):
             save_sent_cache_now(sent_cache)
         _last_cache_save = time.time()
         _cache_dirty = False
-
-def cache_try_add(uid: str) -> bool:
-    """
-    ATOMIC check-and-add: cek apakah uid sudah ada, jika belum langsung tambahkan.
-    Return True  = uid baru, pesan boleh dikirim.
-    Return False = uid sudah ada, SKIP (mencegah double-send).
-    Seluruh operasi di dalam satu lock → tidak ada race condition.
-    """
-    global _cache_dirty, _last_cache_save
-    with _sent_cache_lock:
-        if uid in sent_cache:
-            return False          # sudah ada → jangan kirim
-        sent_cache.add(uid)       # tambahkan SEKARANG dalam lock yang sama
-    _cache_dirty = True
-    if time.time() - _last_cache_save >= 5:
-        with _sent_cache_lock:
-            save_sent_cache_now(sent_cache)
-        _last_cache_save = time.time()
-        _cache_dirty = False
-    return True                   # baru → aman dikirim
+    return True
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # GROUP TARGETS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_targets_lock    = threading.Lock()
-_forward_targets: set = {DEFAULT_TARGET}
+_targets_lock:    threading.Lock = threading.Lock()
+_forward_targets: set             = {DEFAULT_TARGET}
 
 def _load_groups():
     if not os.path.exists(GROUPS_FILE):
@@ -780,15 +735,15 @@ def list_groups() -> list:
         return list(_forward_targets)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TELEGRAM SEND
+# TELEGRAM SEND  (queue-based, non-blocking poll)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 _tg_session = requests.Session()
 _tg_session.mount("https://", requests.adapters.HTTPAdapter(
     pool_connections=4, pool_maxsize=10, max_retries=0,
 ))
+_tg_send_queue: queue.Queue = queue.Queue(maxsize=200)
 
-def _tg_post(chat_id, text, reply_markup=None, retries=3):
-    """Kirim satu pesan ke satu chat_id. Return True jika sukses."""
+def _tg_post(chat_id, text, reply_markup=None, retries=3) -> bool:
     payload = {
         "chat_id":                  chat_id,
         "text":                     text,
@@ -801,8 +756,7 @@ def _tg_post(chat_id, text, reply_markup=None, retries=3):
         try:
             r    = _tg_session.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                json=payload,
-                timeout=10,
+                json=payload, timeout=10,
             )
             data = r.json()
             if data.get("ok"):
@@ -811,7 +765,7 @@ def _tg_post(chat_id, text, reply_markup=None, retries=3):
                 wait = data.get("parameters", {}).get("retry_after", 5)
                 time.sleep(wait + 1)
                 continue
-            _log("TG-ERR", f"chat {chat_id}: {data.get('description', '?')}", Fore.RED)
+            _log("TG-ERR", f"chat {chat_id}: {data.get('description','?')}", Fore.RED)
             return False
         except Exception as e:
             if attempt == retries - 1:
@@ -823,12 +777,9 @@ def _tg_post(chat_id, text, reply_markup=None, retries=3):
 def tg_send_msg(chat_id: int, text: str):
     _tg_post(chat_id, text)
 
-def tg_send_otp(otp: str, msg_text: str):
-    """
-    [FIX 4] Kirim pesan OTP ke semua grup dengan format GARAGE OTP.
-    Keyboard: Baris 1 = tombol OTP (full-width), Baris 2 = NUMBER + CHANNEL.
-    """
-    kb      = build_otp_keyboard(otp)
+def tg_send_otp(otp: str, msg_text: str, sms_text: str = ""):
+    """Kirim OTP ke semua grup secara paralel."""
+    kb      = build_otp_keyboard(otp, sms_text)
     targets = list_groups()
 
     def _send_one(cid):
@@ -839,6 +790,20 @@ def tg_send_otp(otp: str, msg_text: str):
     else:
         with ThreadPoolExecutor(max_workers=min(8, len(targets)), thread_name_prefix="tgsend") as pool:
             list(pool.map(_send_one, targets))
+
+def tg_sender_worker():
+    """Thread dedicated yang drain _tg_send_queue → kirim ke Telegram."""
+    while True:
+        try:
+            uid, otp, msg_text, sms_text = _tg_send_queue.get(timeout=2)
+        except queue.Empty:
+            continue
+        try:
+            tg_send_otp(otp, msg_text, sms_text)
+        except Exception as e:
+            _log("TG-ERR", f"sender worker: {e}", Fore.RED)
+        finally:
+            _tg_send_queue.task_done()
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # COMMAND HANDLER  (/addbot /removebot /listbot)
@@ -931,90 +896,74 @@ def tg_update_listener():
             time.sleep(5)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# POLL ONE ACCOUNT
+# POLL ONE ACCOUNT  — live endpoint, satu request per siklus
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_OTP_RE = re.compile(r"\b\d{3}[- ]?\d{3}\b")
+_OTP_RE = re.compile(
+    r"\b\d{3}[- ]?\d{3,5}\b"   # 6–8 digit dengan/tanpa pemisah (WA: 123-456)
+    r"|\b\d{8}\b"               # 8 digit persis
+)
 
 def poll_one(acc) -> bool:
-    """Ambil semua SMS baru dari satu akun. Return True jika ada OTP terkirim."""
-    found  = False
-    ranges = []
+    """
+    Poll /portal/live/my_sms → filter → enqueue ke TG.
+    Return True jika ada OTP baru di-enqueue.
+    """
+    idx   = acc["idx"]
+    found = False
+
     try:
-        ranges = get_ranges_cached(acc)
+        sms_items = get_live_sms(acc)
     except Exception as e:
-        _log("RANGE", f"akun #{acc['idx']}: {e}", Fore.YELLOW)
+        _log("POLL", f"akun #{idx}: get_live_sms exception: {e}", Fore.YELLOW)
         return False
 
-    def process_number(rng, num, fallback_country, code):
-        full_num = normalize_number(num, code)
-        if not full_num.isdigit():
-            return False
-        try:
-            sms_list = get_sms(acc, rng, num)
-        except Exception as e:
-            _log("SMS", f"akun #{acc['idx']}: {e}", Fore.YELLOW)
-            return False
+    if not sms_items:
+        return False
 
-        local_found = False
-        for sms in sms_list:
-            clean = re.sub(r"\s+", " ", sms.replace("<#>", "")).strip()
-            uid   = hashlib.md5(f"{num}-{clean}".encode()).hexdigest()
+    for full_num, sms, ts in sms_items:
+        # ── Skip SMS lama (timestamp UTC dari IVAS) ───────────────────────────
+        if ts and not _is_sms_recent(ts):
+            continue   # diam-diam skip, tidak perlu log setiap kali
 
-            # Pastikan ada OTP dulu sebelum masuk cache
-            matches = _OTP_RE.findall(sms)
-            if not matches:
-                continue
+        clean = re.sub(r"\s+", " ", sms.replace("<#>", "")).strip()
+        uid   = hashlib.md5(f"{full_num}:{clean}".encode()).hexdigest()
 
-            # ATOMIC check-and-add via cache_try_add() (top-level fn, bukan nested global)
-            # Return False = sudah ada di cache → skip (mencegah double-send)
-            if not cache_try_add(uid):
-                continue
-
-            otp                        = re.sub(r"[^0-9]", "", matches[0])
-            svc                        = detect_service(sms)
-            country, flag, region_code = detect_country_and_flag(full_num, fallback_country)
-
-            # Format header GARAGE OTP + deteksi bahasa SMS
-            msg = build_otp_message(otp, svc, flag, country, region_code, full_num, sms)
-            tg_send_otp(otp, msg)
-
-            _, last4 = garage_mask_phone(full_num)
-            lang     = detect_sms_language(sms)
-            _log(
-                "OTP",
-                f"{svc['icon']} {svc['code']:<3}  {flag} #{region_code}  "
-                f"+{full_num[:4]}🗿{last4}  →  {otp}  #{lang}",
-                Fore.GREEN,
-            )
-            local_found = True
-
-        return local_found
-
-    for rng in ranges:
-        fallback_country, code = parse_range(rng)
-        try:
-            numbers = get_numbers(acc, rng)
-        except Exception as e:
-            _log("NUM", f"akun #{acc['idx']}: {e}", Fore.YELLOW)
-            continue
-        if not numbers:
+        matches = _OTP_RE.findall(sms)
+        if not matches:
             continue
 
-        # Selalu sekuensial + jeda antar nomor agar tidak burst request ke server
-        # ThreadPoolExecutor dihapus — concurrent request = penyebab utama 429
-        for n in numbers:
-            try:
-                if process_number(rng, n, fallback_country, code):
-                    found = True
-            except Exception as e:
-                _log("NUM", f"akun #{acc['idx']}: {e}", Fore.YELLOW)
-            # Jeda kecil antar nomor agar tidak langsung request berikutnya
-            time.sleep(1.5)
+        if not cache_try_add(uid):
+            continue   # sudah dikirim sebelumnya
+
+        otp                        = re.sub(r"[^0-9]", "", matches[0])
+        svc                        = detect_service(sms)
+        country, flag, region_code = detect_country_and_flag(full_num, "")
+
+        msg = build_otp_message(otp, svc, flag, country, region_code, full_num, sms)
+
+        try:
+            _tg_send_queue.put_nowait((uid, otp, msg, sms))
+        except queue.Full:
+            _log("TG-ERR", f"akun #{idx}: queue penuh — OTP +{full_num[:6]}… retry nanti", Fore.YELLOW)
+            # Hapus dari cache agar bisa dicoba lagi di siklus berikutnya
+            with _sent_cache_lock:
+                sent_cache.discard(uid)
+            continue
+
+        _, last4 = garage_mask_phone(full_num)
+        lang     = detect_sms_language(sms)
+        _log(
+            "OTP",
+            f"{svc['icon']} {svc['code']:<3}  {flag} #{region_code}  "
+            f"+{full_num[:4]}🗿{last4}  →  {otp}  #{lang}",
+            Fore.GREEN,
+        )
+        found = True
 
     return found
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# [FIX 1 + 2] ACCOUNT WORKER  — min sleep 5s jika idle
+# ACCOUNT WORKER  — cepat saat ada OTP, backoff saat idle
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def account_worker(acc):
     sleep_time = MIN_IDLE_SLEEP
@@ -1022,24 +971,22 @@ def account_worker(acc):
         try:
             found = poll_one(acc)
             if found:
-                # Jika ada OTP terkirim, tetap beri jeda minimum agar tidak membom server
-                sleep_time = MIN_IDLE_SLEEP
+                # OTP ditemukan → poll cepat lagi setelah jeda kecil
+                sleep_time = POLL_FOUND_SLEEP
             else:
-                # Tidak ada SMS baru: naikkan sleep secara bertahap hingga POLL_INTERVAL_MAX
+                # Idle → backoff bertahap agar tidak spam IVAS
                 sleep_time = min(sleep_time + 1.0, POLL_INTERVAL_MAX)
         except Exception as e:
             _log("WORKER", f"akun #{acc['idx']}: {e}", Fore.RED)
             sleep_time = min(sleep_time * 2, POLL_INTERVAL_MAX)
 
-        # Selalu tidur minimal MIN_IDLE_SLEEP detik (TIDAK PERNAH 0 atau 0.3)
-        time.sleep(max(sleep_time, MIN_IDLE_SLEEP))
+        time.sleep(max(sleep_time, POLL_FOUND_SLEEP))
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# [FIX 2 + 3] KEEPALIVE  — auto-login + notif Telegram hanya 1x jika gagal
+# KEEPALIVE  — auto-login + notif Telegram 1x jika session expired
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 _last_keepalive       = {}
-# [FIX 3] Tracker agar notif SESSION EXPIRED ke Telegram dikirim 1x saja per kegagalan
-_session_expired_sent = {}  # idx -> bool
+_session_expired_sent = {}
 
 def keepalive_worker(accounts):
     _log("KEEPALIVE", f"aktif — ping tiap {KEEPALIVE_INTERVAL}s per akun", Fore.CYAN)
@@ -1056,21 +1003,17 @@ def keepalive_worker(accounts):
                 try:
                     r = acc["session"].get(f"{base}/portal", timeout=15)
                     if is_worker_blocked(r):
-                        _log("KEEPALIVE", f"worker rate-limited ({base}), pindah...", Fore.YELLOW)
                         mark_worker_limited(base)
                         continue
                     if r.status_code == 200 and "/login" not in str(r.url):
                         _recv_csrf_cache.pop(idx, None)
                         _log("KA-OK", f"akun #{idx} — session aktif ✓", Fore.GREEN)
-                        # Session pulih → reset flag notif agar bisa kirim lagi di masa depan
                         _session_expired_sent[idx] = False
                         session_ok = True
                         break
                     if "/login" in str(r.url):
-                        # [FIX 2] Coba auto-login langsung
-                        _log("KEEPALIVE", f"akun #{idx}: session expired, coba auto-login...", Fore.YELLOW)
-                        login_ok = auto_login_ivas(acc)
-                        if login_ok:
+                        _log("KEEPALIVE", f"akun #{idx}: session expired, auto-login...", Fore.YELLOW)
+                        if auto_login_ivas(acc):
                             _recv_csrf_cache.pop(idx, None)
                             _log("KA-OK", f"akun #{idx}: auto-login berhasil ✓", Fore.GREEN)
                             _session_expired_sent[idx] = False
@@ -1081,30 +1024,22 @@ def keepalive_worker(accounts):
                     mark_worker_limited(base)
 
             if not session_ok:
-                _log(
-                    "KA-WARN",
-                    f"akun #{idx} — session tidak bisa dipulihkan. "
-                    f"Periksa IVAS_USERNAME/IVAS_PASSWORD atau perbarui cookie.json.",
-                    Fore.YELLOW,
-                )
-                # [FIX 3] Kirim notif ke Telegram HANYA 1x per siklus kegagalan
-                already_sent = _session_expired_sent.get(idx, False)
-                if not already_sent and OWNER_ID and OWNER_ID != DEFAULT_TARGET:
+                _log("KA-WARN",
+                     f"akun #{idx}: session tidak bisa dipulihkan. "
+                     f"Cek IVAS_USERNAME/IVAS_PASSWORD atau perbarui cookie.json.",
+                     Fore.YELLOW)
+                if not _session_expired_sent.get(idx, False) and OWNER_ID and OWNER_ID != DEFAULT_TARGET:
                     try:
                         _tg_post(OWNER_ID,
                             f"⚠️ <b>SESSION EXPIRED — Auto-Login Gagal</b>\n\n"
                             f"Akun #{idx} tidak bisa akses portal IVAS.\n"
-                            f"Auto-login sudah dicoba namun tetap gagal.\n\n"
                             f"Solusi:\n"
-                            f"• Periksa <code>IVAS_USERNAME</code> / <code>IVAS_PASSWORD</code> di env\n"
-                            f"• Atau perbarui <code>cookie.json</code> dengan cookie fresh dari browser\n"
-                            f"  lalu restart bot.")
+                            f"• Cek <code>IVAS_USERNAME</code> / <code>IVAS_PASSWORD</code> di env\n"
+                            f"• Atau perbarui <code>cookie.json</code> dengan cookie fresh.\n"
+                            f"  Lalu restart bot.")
                         _session_expired_sent[idx] = True
-                        _log("KA-WARN", f"akun #{idx}: notif SESSION EXPIRED dikirim (1x)", Fore.YELLOW)
                     except Exception as e:
-                        _log("KA-ERR", f"gagal kirim notif Telegram: {e}", Fore.RED)
-                elif already_sent:
-                    _log("KA-WARN", f"akun #{idx}: notif sudah dikirim sebelumnya, skip", Fore.YELLOW)
+                        _log("KA-ERR", f"gagal kirim notif: {e}", Fore.RED)
 
             _last_keepalive[idx] = now
             time.sleep(2)
@@ -1171,26 +1106,20 @@ def main():
 
     print(Fore.CYAN + Style.BRIGHT, end="")
     print("  ╔══════════════════════════════════════╗")
-    print("  ║   🕷  SPIDERMAT OTP BOT              ║")
-    print("  ║        FORWARD MODE  v2.0            ║")
+    print("  ║   🕷  SPIDERMAT OTP BOT  v3.0        ║")
+    print("  ║        LIVE ENDPOINT MODE            ║")
     print("  ╚══════════════════════════════════════╝")
     print(Style.RESET_ALL)
 
-    # ── LANGKAH 1: Health server SELALU start duluan ─────────────────────────
-    # Railway healthcheck akan gagal jika server belum bind saat check dimulai.
-    # Dengan start di sini, /health tetap merespons meski inisialisasi lainnya
-    # lambat atau gagal — Railway tidak akan force-kill deployment karena timeout.
+    # ── Health server selalu start duluan (Railway healthcheck) ───────────────
     hs_thread = threading.Thread(target=run_health_server, daemon=True, name="health")
     hs_thread.start()
-    time.sleep(0.3)   # beri sedikit waktu agar socket bind selesai
-    _log("SERVER", "Health server aktif — Railway healthcheck siap", Fore.GREEN)
-    # ──────────────────────────────────────────────────────────────────────────
+    time.sleep(0.3)
+    _log("SERVER", "Health server aktif", Fore.GREEN)
 
-    # ── LANGKAH 2: Validasi env vars ─────────────────────────────────────────
+    # ── Validasi env vars ─────────────────────────────────────────────────────
     if not BOT_TOKEN:
         _log("FATAL", "BOT_TOKEN belum diset! Set via environment variable.", Fore.RED)
-        # Jangan sys.exit() — biarkan health server tetap jalan agar Railway
-        # tidak langsung hapus deployment. Loop tanpa henti agar tidak crash.
         while True:
             time.sleep(60)
 
@@ -1201,11 +1130,11 @@ def main():
 
     _load_groups()
 
-    # ── LANGKAH 3: Load cookies ───────────────────────────────────────────────
+    # ── Load cookies ──────────────────────────────────────────────────────────
     cookies_list = load_cookies()
     if not cookies_list:
         _log("FATAL", f"Tidak ada cookie valid di {COOKIE_FILE}. Isi dulu!", Fore.RED)
-        while True:   # health server tetap hidup
+        while True:
             time.sleep(60)
 
     accounts = []
@@ -1220,19 +1149,20 @@ def main():
         _log("COOKIE", f"Akun #{idx} — {len(ck)} cookie dimuat", Fore.GREEN)
 
     print()
-    _log("CONFIG", f"Default target   →  {DEFAULT_TARGET}",              Fore.CYAN)
-    _log("CONFIG", f"Total target     →  {len(list_groups())} grup",     Fore.CYAN)
-    _log("CONFIG", f"Channel link     →  {CHANNEL_LINK}",                Fore.CYAN)
-    _log("CONFIG", f"Worker pool      →  {len(WORKER_POOL)} proxy",      Fore.CYAN)
-    _log("CONFIG", f"Poll interval    →  max {POLL_INTERVAL_MAX}s",      Fore.CYAN)
-    _log("CONFIG", f"Min idle sleep   →  {MIN_IDLE_SLEEP}s",             Fore.CYAN)
-    _log("CONFIG", f"Keepalive        →  tiap {KEEPALIVE_INTERVAL}s",    Fore.CYAN)
-    _log("CONFIG", f"SMS thread max   →  3 per range",                   Fore.CYAN)
+    _log("CONFIG", f"Default target   →  {DEFAULT_TARGET}",             Fore.CYAN)
+    _log("CONFIG", f"Total target     →  {len(list_groups())} grup",    Fore.CYAN)
+    _log("CONFIG", f"Channel link     →  {CHANNEL_LINK}",               Fore.CYAN)
+    _log("CONFIG", f"Worker pool      →  {len(WORKER_POOL)} proxy",     Fore.CYAN)
+    _log("CONFIG", f"Poll found sleep →  {POLL_FOUND_SLEEP}s",          Fore.CYAN)
+    _log("CONFIG", f"Idle sleep range →  {MIN_IDLE_SLEEP}–{POLL_INTERVAL_MAX}s", Fore.CYAN)
+    _log("CONFIG", f"Max SMS age      →  {MAX_SMS_AGE_MINUTES} menit",  Fore.CYAN)
+    _log("CONFIG", f"Keepalive        →  tiap {KEEPALIVE_INTERVAL}s",   Fore.CYAN)
     print()
 
-    # ── LANGKAH 4: Start thread-thread background ─────────────────────────────
+    # ── Start threads ─────────────────────────────────────────────────────────
     threading.Thread(target=tg_update_listener,                 daemon=True, name="cmd-listener").start()
     threading.Thread(target=keepalive_worker, args=(accounts,), daemon=True, name="keepalive").start()
+    threading.Thread(target=tg_sender_worker,                   daemon=True, name="tg-sender").start()
 
     for acc in accounts:
         threading.Thread(
@@ -1240,11 +1170,12 @@ def main():
             daemon=True, name=f"poll-{acc['idx']}",
         ).start()
         _log("THREAD+", f"Akun #{acc['idx']} — polling aktif", Fore.GREEN)
+        time.sleep(2)   # stagger antar akun
 
     print()
     _log("CONFIG", "Bot berjalan. Ketik /addbot di grup untuk mendaftarkan.", Fore.CYAN)
 
-    # ── LANGKAH 5: Main thread — flush cache periodik ─────────────────────────
+    # ── Main thread — flush cache periodik ───────────────────────────────────
     while True:
         if _cache_dirty and time.time() - _last_cache_save >= 5:
             with _sent_cache_lock:
