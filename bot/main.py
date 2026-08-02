@@ -637,20 +637,15 @@ def build_otp_message(
     - #{lang}        = bahasa OTP yang terdeteksi (EN, ID, AR, ...)
     OTP tampil di tombol keyboard, bukan di body pesan.
     """
-    prefix, last4 = garage_mask_phone(full_num)
+        prefix, last4 = garage_mask_phone(full_num)
     masked_phone  = f"{prefix}🗿{last4}" if last4 else prefix
-    lang_code     = detect_sms_language(sms_text) if sms_text else "EN"
-    svc_code      = svc.get("code", "OT")
+    lang_code     = detect_sms_language(sms_text) if sms_text else "ID"
+    svc_code      = svc.get("code", "WS")
 
-    return f"{flag} #{region_code} {svc_code} {masked_phone} #{lang_code}"
+    return f"<b>SPIDERMAT BOT</b>   <code>SIGANTENG</code>\n{flag} #{region_code} {svc_code} {masked_phone} #{lang_code}"
+
 
 def build_otp_keyboard(otp: str) -> dict:
-    """
-    Inline keyboard style Mail_PG:
-      Baris 1 (HIJAU): [📋 OTP_CODE]       → copy_text (Telegram render hijau)
-      Baris 2 (BIRU):  [📱 NUMBER] [🔔 CHANNEL] → url (Telegram render biru)
-    """
-    # Format OTP dengan tanda pisah: 738146 → 738-146
     otp_display = f"{otp[:3]}-{otp[3:]}" if len(otp) == 6 else otp
     return {
         "inline_keyboard": [
@@ -658,14 +653,15 @@ def build_otp_keyboard(otp: str) -> dict:
                 {
                     "text":      f"📋 {otp_display}",
                     "copy_text": {"text": otp},
+                },
+                {
+                    "text": "All File ↗",
+                    "url":  https://t.me/matchaappp
                 }
-            ],
-            [
-                {"text": "📱 NUMBER ↗",  "url": NUMBER_LINK},
-                {"text": "🔔 CHANNEL ↗", "url": CHANNEL_LINK},
-            ],
+            ]
         ]
     }
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # SENT CACHE  (dedup agar OTP tidak terkirim dua kali)
