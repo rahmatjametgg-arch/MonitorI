@@ -896,7 +896,212 @@ def tg_update_listener():
             time.sleep(5)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# POLL ONE ACCOUNT  — live endpoint, satu request per siklus
+# FALLBACK PIPELINE  — range → number → SMS  (terbukti kerja, dipakai jika
+# live endpoint tidak return data)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_ranges_cache     = {}
+_ranges_429_until = {}
+RANGES_CACHE_TTL  = 180   # 3 menit (lebih pendek = lebih responsif)
+
+def _get_today():
+    return datetime.now().strftime("%Y-%m-%d")
+
+def get_ranges(acc, _retry=0) -> list:
+    idx = acc["idx"]
+    now = time.time()
+    if now < _ranges_429_until.get(idx, 0):
+        entry = _ranges_cache.get(idx)
+        return entry[1] if entry else []
+    base  = get_base()
+    today = _get_today()
+    csrf  = get_recv_csrf(acc)
+    try:
+        r = acc["session"].post(
+            f"{base}/portal/sms/received/getsms",
+            data={"_token": csrf, "from": today, "to": today},
+            headers=_recv_headers(base),
+            timeout=15,
+        )
+    except Exception as e:
+        _log("RANGE", f"akun #{idx}: {e}", Fore.YELLOW)
+        return []
+    if is_worker_blocked(r):
+        mark_worker_limited(base)
+        if _all_workers_limited() or _retry >= len(WORKER_POOL) - 1:
+            entry = _ranges_cache.get(idx)
+            return entry[1] if entry else []
+        time.sleep(3 * (_retry + 1))
+        return get_ranges(acc, _retry + 1)
+    if r.status_code == 429:
+        _ranges_429_until[idx] = now + 120
+        entry = _ranges_cache.get(idx)
+        return entry[1] if entry else []
+    if "/login" in str(r.url):
+        auto_login_ivas(acc)
+        return []
+    soup   = BeautifulSoup(r.text, "html.parser")
+    ranges = []
+    for div in soup.find_all("div", onclick=True):
+        if "toggleRange" in div["onclick"]:
+            try:
+                ranges.append(div["onclick"].split("'")[1])
+            except Exception:
+                pass
+    result = list(set(ranges))
+    _ranges_429_until.pop(idx, None)
+    if result:
+        _ranges_cache[idx] = (now, result)
+    return result
+
+def get_ranges_cached(acc) -> list:
+    idx  = acc["idx"]
+    now  = time.time()
+    if now < _ranges_429_until.get(idx, 0):
+        entry = _ranges_cache.get(idx)
+        return entry[1] if entry else []
+    entry = _ranges_cache.get(idx)
+    if entry and (now - entry[0]) < RANGES_CACHE_TTL:
+        return entry[1]
+    return get_ranges(acc)
+
+def get_numbers(acc, rng, _retry=0) -> list:
+    base  = get_base()
+    today = _get_today()
+    csrf  = get_recv_csrf(acc)
+    try:
+        r = acc["session"].post(
+            f"{base}/portal/sms/received/getsms/number",
+            data={"_token": csrf, "start": today, "end": today, "range": rng},
+            headers=_recv_headers(base),
+            timeout=15,
+        )
+    except Exception as e:
+        _log("NUM", f"get_numbers: {e}", Fore.YELLOW)
+        return []
+    if is_worker_blocked(r):
+        mark_worker_limited(base)
+        if _all_workers_limited() or _retry >= len(WORKER_POOL) - 1:
+            return []
+        time.sleep(3 * (_retry + 1))
+        return get_numbers(acc, rng, _retry + 1)
+    if r.status_code == 429:
+        return []
+    if "/login" in str(r.url):
+        auto_login_ivas(acc)
+        return []
+    soup    = BeautifulSoup(r.text, "html.parser")
+    numbers = []
+    for div in soup.find_all("div", onclick=True):
+        try:
+            val = div["onclick"].split("'")[1]
+            if val and val != rng:
+                numbers.append(val)
+        except Exception:
+            pass
+    return list(set(numbers))
+
+def get_sms(acc, rng, number, _retry=0) -> list:
+    base  = get_base()
+    today = _get_today()
+    csrf  = get_recv_csrf(acc)
+    try:
+        r = acc["session"].post(
+            f"{base}/portal/sms/received/getsms/number/sms",
+            data={"_token": csrf, "start": today, "end": today, "Number": number, "Range": rng},
+            headers=_recv_headers(base),
+            timeout=15,
+        )
+    except Exception as e:
+        _log("SMS", f"get_sms: {e}", Fore.YELLOW)
+        return []
+    if is_worker_blocked(r):
+        mark_worker_limited(base)
+        if _all_workers_limited() or _retry >= len(WORKER_POOL) - 1:
+            return []
+        time.sleep(3 * (_retry + 1))
+        return get_sms(acc, rng, number, _retry + 1)
+    if r.status_code == 429:
+        return []
+    if "/login" in str(r.url):
+        auto_login_ivas(acc)
+        return []
+    soup      = BeautifulSoup(r.text, "html.parser")
+    sms_texts = []
+    try:
+        for t in soup.stripped_strings:
+            t     = t.strip().replace("<#>", "").strip()
+            t_low = t.lower()
+            if re.fullmatch(r"[A-Za-z0-9]{10,}", t):
+                continue
+            if any(x in t_low for x in ["sender", "revenue", "time"]):
+                continue
+            if re.search(r"\b\d{2}:\d{2}:\d{2}\b", t):
+                continue
+            if "$" in t:
+                continue
+            if t and "No SMS Found" not in t:
+                sms_texts.append(t)
+    except Exception as e:
+        _log("SMS", f"parse_sms error: {e}", Fore.RED)
+    return list(dict.fromkeys(sms_texts))
+
+def parse_range(rng: str):
+    country    = re.sub(r"\s*\(.*?\)", "", rng)
+    country    = re.sub(r"\d+", "", country)
+    country    = re.sub(r"\s+", " ", country).strip().upper()
+    code_match = re.search(r"\((\d+)\)", rng)
+    code       = code_match.group(1) if code_match else ""
+    return country, code
+
+def normalize_number(num: str, country_code: str) -> str:
+    num = str(num).strip().replace(" ", "").replace("-", "").replace("+", "")
+    if country_code and num.startswith(country_code):
+        return num
+    if num.startswith("0") and country_code:
+        return country_code + num[1:]
+    return num
+
+def _pipeline_to_sms_items(acc) -> list:
+    """
+    Fallback: range → number → SMS pipeline.
+    Return: list of (full_number, sms_text, "")  (timestamp kosong = skip time filter)
+    """
+    idx    = acc["idx"]
+    result = []
+    try:
+        ranges = get_ranges_cached(acc)
+    except Exception as e:
+        _log("RANGE", f"akun #{idx}: {e}", Fore.YELLOW)
+        return []
+    if not ranges:
+        return []
+    _log("POLL", f"akun #{idx}: fallback pipeline — {len(ranges)} range", Fore.WHITE)
+    for rng in ranges:
+        if _all_workers_limited():
+            break
+        fallback_country, code = parse_range(rng)
+        try:
+            numbers = get_numbers(acc, rng)
+        except Exception:
+            continue
+        if not numbers:
+            continue
+        for num in numbers:
+            if _all_workers_limited():
+                break
+            full_num = normalize_number(num, code)
+            if not full_num.isdigit():
+                continue
+            try:
+                sms_list = get_sms(acc, rng, num)
+            except Exception:
+                continue
+            for sms in sms_list:
+                result.append((full_num, sms, ""))  # ts="" → bypass time filter
+    return result
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# POLL ONE ACCOUNT  — live dulu, fallback pipeline jika perlu
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 _OTP_RE = re.compile(
     r"\b\d{3}[- ]?\d{3,5}\b"   # 6–8 digit dengan/tanpa pemisah (WA: 123-456)
@@ -905,25 +1110,34 @@ _OTP_RE = re.compile(
 
 def poll_one(acc) -> bool:
     """
-    Poll /portal/live/my_sms → filter → enqueue ke TG.
+    Coba live endpoint dulu (1 request, cepat).
+    Kalau kosong → fallback ke range→number→SMS pipeline (terbukti kerja).
     Return True jika ada OTP baru di-enqueue.
     """
     idx   = acc["idx"]
     found = False
 
+    # ── Path 1: Live endpoint ─────────────────────────────────────────────────
     try:
         sms_items = get_live_sms(acc)
-    except Exception as e:
-        _log("POLL", f"akun #{idx}: get_live_sms exception: {e}", Fore.YELLOW)
-        return False
+    except Exception:
+        sms_items = []
+
+    # ── Path 2: Fallback pipeline jika live kosong ────────────────────────────
+    if not sms_items:
+        try:
+            sms_items = _pipeline_to_sms_items(acc)
+        except Exception as e:
+            _log("POLL", f"akun #{idx}: pipeline exception: {e}", Fore.YELLOW)
+            return False
 
     if not sms_items:
         return False
 
     for full_num, sms, ts in sms_items:
-        # ── Skip SMS lama (timestamp UTC dari IVAS) ───────────────────────────
+        # Time filter hanya kalau ada timestamp (live endpoint)
         if ts and not _is_sms_recent(ts):
-            continue   # diam-diam skip, tidak perlu log setiap kali
+            continue
 
         clean = re.sub(r"\s+", " ", sms.replace("<#>", "")).strip()
         uid   = hashlib.md5(f"{full_num}:{clean}".encode()).hexdigest()
@@ -933,7 +1147,7 @@ def poll_one(acc) -> bool:
             continue
 
         if not cache_try_add(uid):
-            continue   # sudah dikirim sebelumnya
+            continue
 
         otp                        = re.sub(r"[^0-9]", "", matches[0])
         svc                        = detect_service(sms)
@@ -944,8 +1158,7 @@ def poll_one(acc) -> bool:
         try:
             _tg_send_queue.put_nowait((uid, otp, msg, sms))
         except queue.Full:
-            _log("TG-ERR", f"akun #{idx}: queue penuh — OTP +{full_num[:6]}… retry nanti", Fore.YELLOW)
-            # Hapus dari cache agar bisa dicoba lagi di siklus berikutnya
+            _log("TG-ERR", f"akun #{idx}: queue penuh — retry nanti", Fore.YELLOW)
             with _sent_cache_lock:
                 sent_cache.discard(uid)
             continue
