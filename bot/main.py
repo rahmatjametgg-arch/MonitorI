@@ -55,8 +55,9 @@ GROUPS_FILE        = "file/groups.json"
 MAX_CACHE          = 2000
 
 # [FIX 1] POLL_INTERVAL_MAX dinaikkan ke 12 detik (bukan 3)
-POLL_INTERVAL_MAX  = 45.0   # detik — jeda maks saat tidak ada OTP baru
-MIN_IDLE_SLEEP     = 15.0   # detik — minimum sleep jika tidak ada SMS baru
+POLL_INTERVAL_MAX  = 2.0   # detik – jeda maks saat tidak ada OTP baru
+MIN_IDLE_SLEEP     = 1.0   # detik – minimum sleep jika tidak ada SMS baru
+
 
 KEEPALIVE_INTERVAL = 480    # detik — ping /portal tiap 8 menit
 
@@ -627,29 +628,17 @@ def build_otp_message(
     full_num:    str,
     sms_text:    str = "",
 ) -> str:
-    """
-    Format header GARAGE OTP:
-        🇮🇩 #ID WS +6288🗿0303 #EN
-
-    - #{region_code} = kode negara (ID, EG, PE, ...)
-    - svc["code"]    = kode platform (WS, FB, IG, TG, OT, ...)
-    - #{lang}        = bahasa OTP yang terdeteksi (EN, ID, AR, ...)
-    OTP tampil di tombol keyboard, bukan di body pesan.
-    """
     prefix, last4 = garage_mask_phone(full_num)
     masked_phone  = f"{prefix}🗿{last4}" if last4 else prefix
-    lang_code     = detect_sms_language(sms_text) if sms_text else "EN"
-    svc_code      = svc.get("code", "OT")
+    lang_code     = detect_sms_language(sms_text) if sms_text else "ID"
+    svc_code      = svc.get("code", "WS")
 
+    header_emoji = '<tg-emoji id="5334998226636390258">🟢</tg-emoji>'
+    return f"{header_emoji} <b>SPIDERMAT BOT</b>   <code>SIGANTENG</code>\n{flag} #{region_code} {svc_code} {masked_phone} #{lang_code}"
+  
     return f"{flag} #{region_code} {svc_code} {masked_phone} #{lang_code}"
 
 def build_otp_keyboard(otp: str) -> dict:
-    """
-    Inline keyboard style Mail_PG:
-      Baris 1 (HIJAU): [📋 OTP_CODE]       → copy_text (Telegram render hijau)
-      Baris 2 (BIRU):  [📱 NUMBER] [🔔 CHANNEL] → url (Telegram render biru)
-    """
-    # Format OTP dengan tanda pisah: 738146 → 738-146
     otp_display = f"{otp[:3]}-{otp[3:]}" if len(otp) == 6 else otp
     return {
         "inline_keyboard": [
@@ -660,11 +649,11 @@ def build_otp_keyboard(otp: str) -> dict:
                 }
             ],
             [
-                {"text": "📱 NUMBER ↗",  "url": NUMBER_LINK},
-                {"text": "🔔 CHANNEL ↗", "url": CHANNEL_LINK},
+                {"text": "All File ↗", "url": CHANNEL_LINK},
             ],
         ]
     }
+  
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # SENT CACHE  (dedup agar OTP tidak terkirim dua kali)
