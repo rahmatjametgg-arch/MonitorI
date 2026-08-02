@@ -55,8 +55,9 @@ GROUPS_FILE        = "file/groups.json"
 MAX_CACHE          = 2000
 
 # [FIX 1] POLL_INTERVAL_MAX dinaikkan ke 12 detik (bukan 3)
-POLL_INTERVAL_MAX  = 45.0   # detik — jeda maks saat tidak ada OTP baru
-MIN_IDLE_SLEEP     = 15.0   # detik — minimum sleep jika tidak ada SMS baru
+POLL_INTERVAL_MAX  = 5.0   # detik — batas jeda maks saat sepi OTP
+MIN_IDLE_SLEEP     = 2.0   # detik — jeda minimal antar-poll (paling pas & aman)
+
 
 KEEPALIVE_INTERVAL = 480    # detik — ping /portal tiap 8 menit
 
