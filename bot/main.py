@@ -382,9 +382,10 @@ def send_telegram(phone, sms_text):
         _log("TG-ERR", f"Gagal kirim: {e}", Fore.RED)
 
 # ----------------------------
-# POLLING SYSTEM & WORKERS
+# POLLING SYSTEM & WORKERS (FAST LANE)
 # ----------------------------
 _sent_cache = set()
+_active_numbers_cache = {}  # Priority tracker untuk nomor yang aktif
 
 def poll_one(acc):
     ranges = get_ranges(acc)
@@ -392,36 +393,53 @@ def poll_one(acc):
         return False
 
     found_any = False
+    now = time.time()
+
     for rng in ranges:
+        # Cek daftar nomor di dalam range
         numbers = get_numbers(acc, rng)
-        time.sleep(1.5)  # Delay aman agar worker gak kena rate-limit
-        
+        if not numbers:
+            continue
+
         for num in numbers:
+            # Langsung sikat cek SMS
             sms_list = get_sms(acc, rng, num)
-            for sms in sms_list:
-                cache_key = f"{num}:{sms.strip()}"
-                if cache_key not in _sent_cache:
-                    _sent_cache.add(cache_key)
-                    send_telegram(num, sms)
-                    found_any = True
-            time.sleep(1.5)  # Jeda ambil SMS per nomor
+            
+            if sms_list:
+                for sms in sms_list:
+                    sms_clean = sms.strip()
+                    cache_key = f"{num}:{sms_clean}"
+                    
+                    if cache_key not in _sent_cache:
+                        _sent_cache.add(cache_key)
+                        send_telegram(num, sms_clean)
+                        found_any = True
+                        # Tandai nomor ini sebagai "HOT/ACTIVE" selama 5 menit
+                        _active_numbers_cache[num] = now + 300 
+
+            # Jeda tipis banget 0.2 detik antar nomor biar nggak bikin antrean panjang
+            time.sleep(0.2)
+            
     return found_any
 
 def account_worker(acc):
-    sleep_time = 5.0  # Jeda awal polling dibuat 5 detik
     while True:
         try:
             if _all_workers_limited():
-                _log("WORKER", "Semua worker kena rate-limit, istirahat 60s...", Fore.YELLOW)
-                time.sleep(60)
+                time.sleep(15)  # Kurangi masa pingsan kalo rate limit
                 continue
 
             found = poll_one(acc)
-            sleep_time = 3.0 if found else 8.0  # Jeda polling aman
+            
+            # Kalo nemu OTP langsung putar ulang TANPA JEDA (0.5s)
+            # Kalo sepi, jeda cuma 1.5 detik (dari yang tadinya 8-10 detik!)
+            sleep_time = 0.5 if found else 1.5
+            
         except Exception as e:
-            sleep_time = 10.0
+            sleep_time = 3.0
 
         time.sleep(sleep_time)
+                        
         
 
 # ----------------------------
