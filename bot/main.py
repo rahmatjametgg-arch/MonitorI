@@ -316,15 +316,22 @@ def send_telegram(phone, sms_text):
     if not BOT_TOKEN:
         return
 
+    # Cari angka OTP (format XXX-XXX atau 4-8 digit)
     m = re.search(r"\b\d{3}[-\s]?\d{3}\b", sms_text)
     if not m:
         m = re.search(r"\b\d{4,8}\b", sms_text)
-    otp = m.group(0) if m else "N/A"
+    
+    # Kalo gak ada OTP asli / bernilai N/A -> SKIP! Jangan kirim ke Telegram
+    if not m:
+        return
+
+    otp = m.group(0)
 
     cleaned = re.sub(r"\D", "", phone)
     cc = cleaned[:3] if len(cleaned) >= 10 else "1"
     flag = _get_flag(cc)
 
+    # Format Teks & Tombol Salin OTP
     caption = f"{flag} #{cc} WS +{phone} 🗿 #ID"
     keyboard = {
         "inline_keyboard": [
@@ -347,7 +354,7 @@ def send_telegram(phone, sms_text):
         _log("OTP", f"Terkirim Telegram: +{phone} -> {otp}", Fore.GREEN)
     except Exception as e:
         _log("TG-ERR", f"Gagal kirim: {e}", Fore.RED)
-
+        
 # ----------------------------
 # POLLING SYSTEM & WORKERS
 # ----------------------------
@@ -364,14 +371,17 @@ def poll_one(acc):
         for num in numbers:
             sms_list = get_sms(acc, rng, num)
             for sms in sms_list:
-                cache_key = f"{num}:{sms}"
+                # Kunci unik berdasarkan Nomor HP + Teks SMS
+                cache_key = f"{num}:{sms.strip()}"
                 if cache_key not in _sent_cache:
                     _sent_cache.add(cache_key)
+                    
+                    # Coba kirim (akan di-filter di dalam send_telegram jika N/A)
                     send_telegram(num, sms)
                     found_any = True
-            time.sleep(1.0)
+            time.sleep(0.5)
     return found_any
-
+    
 def account_worker(acc):
     sleep_time = MIN_IDLE_SLEEP
     while True:
