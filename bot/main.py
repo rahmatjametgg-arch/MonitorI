@@ -332,14 +332,28 @@ def send_telegram(phone, sms_text):
     if not BOT_TOKEN:
         return
 
-    m = re.search(r"\b\d{3}[-\s]?\d{3}\b", sms_text)
-    if not m:
-        m = re.search(r"\b\d{4,8}\b", sms_text)
-    
-    if not m:
+    # Abaikan teks bawaan IVAS/header jam
+    sms_clean = sms_text.strip()
+    if any(x in sms_clean.lower() for x in ["sender", "revenue", "time"]):
         return
 
-    otp = m.group(0)
+    # 1. Cari OTP format XXX-XXX atau 6 digit
+    m = re.search(r"\b\d{3}[-\s]?\d{3}\b", sms_clean)
+    otp = None
+    
+    if m:
+        otp = m.group(0)
+    else:
+        # 2. Jika tidak ada, cari angka 4-8 digit TAPI BUKAN 0120
+        candidates = re.findall(r"\b\d{4,8}\b", sms_clean)
+        for c in candidates:
+            if c != "0120":
+                otp = c
+                break
+
+    # Kalo tetep bernilai 0120 / None -> STOP!
+    if not otp or otp == "0120":
+        return
 
     flag, _ = _get_flag(phone)
     masked_num = mask_phone(phone)
@@ -380,34 +394,35 @@ def poll_one(acc):
     found_any = False
     for rng in ranges:
         numbers = get_numbers(acc, rng)
+        time.sleep(1.5)  # Delay aman agar worker gak kena rate-limit
+        
         for num in numbers:
             sms_list = get_sms(acc, rng, num)
             for sms in sms_list:
-                # Kunci unik berdasarkan Nomor HP + Teks SMS
                 cache_key = f"{num}:{sms.strip()}"
                 if cache_key not in _sent_cache:
                     _sent_cache.add(cache_key)
-                    
-                    # Coba kirim (akan di-filter di dalam send_telegram jika N/A)
                     send_telegram(num, sms)
                     found_any = True
-            time.sleep(0.5)
+            time.sleep(1.5)  # Jeda ambil SMS per nomor
     return found_any
-    
+
 def account_worker(acc):
-    sleep_time = MIN_IDLE_SLEEP
+    sleep_time = 5.0  # Jeda awal polling dibuat 5 detik
     while True:
         try:
             if _all_workers_limited():
+                _log("WORKER", "Semua worker kena rate-limit, istirahat 60s...", Fore.YELLOW)
                 time.sleep(60)
                 continue
 
             found = poll_one(acc)
-            sleep_time = MIN_IDLE_SLEEP if found else min(sleep_time + 1.0, 10.0)
+            sleep_time = 3.0 if found else 8.0  # Jeda polling aman
         except Exception as e:
             sleep_time = 10.0
 
         time.sleep(sleep_time)
+        
 
 # ----------------------------
 # RAILWAY HEALTHCHECK DUMMY SERVER
