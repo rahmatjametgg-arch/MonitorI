@@ -302,37 +302,49 @@ def get_sms(acc, rng, number):
     # ----------------------------
 # TELEGRAM FORWARDER
 # ----------------------------
-def _get_flag(cc_str):
+def _get_flag(phone_str):
+    cleaned = re.sub(r"\D", "", phone_str)
+    if not cleaned:
+        return "🌐", "1"
+    
     try:
-        p = phonenumbers.parse("+" + cc_str, None)
-        region = geocoder.region_code_for_number(p)
+        parsed = phonenumbers.parse("+" + cleaned, None)
+        region = geocoder.region_code_for_number(parsed)
+        cc = str(parsed.country_code)
         if region and len(region) == 2:
-            return chr(ord(region[0]) + 127397) + chr(ord(region[1]) + 127397)
+            flag = chr(ord(region[0]) + 127397) + chr(ord(region[1]) + 127397)
+            return flag, cc
     except:
         pass
-    return "🌐"
+
+    return "🌐", cleaned[:3]
+
+def mask_phone(phone_str):
+    cleaned = re.sub(r"\D", "", phone_str)
+    if len(cleaned) <= 7:
+        return cleaned
+    
+    prefix = cleaned[:4]
+    suffix = cleaned[-4:]
+    return f"+{prefix}🗿{suffix}"
 
 def send_telegram(phone, sms_text):
     if not BOT_TOKEN:
         return
 
-    # Cari angka OTP (format XXX-XXX atau 4-8 digit)
     m = re.search(r"\b\d{3}[-\s]?\d{3}\b", sms_text)
     if not m:
         m = re.search(r"\b\d{4,8}\b", sms_text)
     
-    # Kalo gak ada OTP asli / bernilai N/A -> SKIP! Jangan kirim ke Telegram
     if not m:
         return
 
     otp = m.group(0)
 
-    cleaned = re.sub(r"\D", "", phone)
-    cc = cleaned[:3] if len(cleaned) >= 10 else "1"
-    flag = _get_flag(cc)
+    flag, _ = _get_flag(phone)
+    masked_num = mask_phone(phone)
 
-    # Format Teks & Tombol Salin OTP
-    caption = f"{flag} #{cc} WS +{phone} 🗿 #ID"
+    caption = f"{flag} WS {masked_num} #ID"
     keyboard = {
         "inline_keyboard": [
             [{"text": f"📋 {otp}", "copy_text": {"text": otp}}],
@@ -351,10 +363,10 @@ def send_telegram(phone, sms_text):
             },
             timeout=10,
         )
-        _log("OTP", f"Terkirim Telegram: +{phone} -> {otp}", Fore.GREEN)
+        _log("OTP", f"Terkirim Telegram: {masked_num} -> {otp}", Fore.GREEN)
     except Exception as e:
         _log("TG-ERR", f"Gagal kirim: {e}", Fore.RED)
-        
+
 # ----------------------------
 # POLLING SYSTEM & WORKERS
 # ----------------------------
