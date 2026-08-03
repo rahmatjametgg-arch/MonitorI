@@ -549,7 +549,7 @@ def garage_mask_phone(full_num: str) -> tuple:
         return prefix, last4
     return "+" + n, ""
 
-# MESSAGE BUILDER & KEYBOARD (UI SPIDERMAT)
+# MESSAGE BUILDER & KEYBOARD (STYLE BOT PG)
 def build_otp_message(
     otp:         str,
     svc:         dict,
@@ -564,7 +564,8 @@ def build_otp_message(
     lang_code     = detect_sms_language(sms_text) if sms_text else "ID"
     svc_code      = svc.get("code", "WS")
 
-    return f"<b>SPIDERMAT BOT</b>   <code>SIGANTENG</code>\n{flag} #{region_code} {svc_code} {masked_phone} #{lang_code}"
+    # Teks header jelek dihapus, langsung rangkuman info
+    return f"{flag} #{region_code} {svc_code} {masked_phone} #{lang_code}"
 
 def build_otp_keyboard(otp: str) -> dict:
     otp_display = f"{otp[:3]}-{otp[3:]}" if len(otp) == 6 else otp
@@ -572,16 +573,19 @@ def build_otp_keyboard(otp: str) -> dict:
         "inline_keyboard": [
             [
                 {
-                    "text":      f"📋 {otp_display}",
-                    "copy_text": {"text": otp},
-                },
+                    "text": f"📋 {otp_display}",
+                    "url":  f"https://t.me/share/url?url={otp}"  # Tombol Aksi (Hijau Solid)
+                }
+            ],
+            [
                 {
-                    "text": "All File ↗",
-                    "url":  CHANNEL_LINK,
+                    "text": "All File",
+                    "url":  CHANNEL_LINK  # Tombol Tautan (Biru Solid)
                 }
             ]
         ]
     }
+    
 # SENT CACHE
 _sent_cache_lock = threading.Lock()
 _cache_dirty     = False
