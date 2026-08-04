@@ -441,9 +441,20 @@ def account_worker(acc):
     while True:
         try:
             r = acc["session"].get(url, headers=headers, timeout=10)
+            
+            # Print status biar tau respon server IVAS
+            _log("CHECK", f"Status: {r.status_code} | Len Response: {len(r.text)}", Fore.MAGENTA)
+            
             if r.status_code == 200:
                 soup = BeautifulSoup(r.text, "html.parser")
                 rows = soup.find_all("tr")
+                
+                # Kalo misal responnya JSON bukan HTML:
+                # try:
+                #     data = r.json()
+                #     _log("DATA-JSON", str(data)[:100], Fore.YELLOW)
+                # except: pass
+
                 for row in rows:
                     cols = [td.text.strip() for td in row.find_all("td")]
                     if len(cols) >= 5:
@@ -458,7 +469,6 @@ def account_worker(acc):
 
         time.sleep(3)
         
-            
 # ----------------------------
 # RAILWAY HEALTHCHECK DUMMY SERVER
 # ----------------------------
