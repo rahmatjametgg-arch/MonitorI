@@ -1,6 +1,6 @@
 """
-SPIDERMAT OTP BOT — FORWARD MODE
-Full Clean & Restructured Code
+SPIDERMAT OTP BOT — FAST & ANTI-RATE LIMIT
+Focus: Real-time OTP Forwarder without spamming endpoints
 """
 
 import httpx
@@ -32,7 +32,7 @@ DEFAULT_TARGET = -1003686221386
 
 CHANNEL_LINK  = "https://t.me/matchaappp"
 COOKIE_FILE   = "cookie.json"
-WORKER_LIMIT_COOLDOWN = 900
+WORKER_LIMIT_COOLDOWN = 300  # Cooldown disingkat jadi 5 menit
 
 # ----------------------------
 # WORKER POOL & LOGGING
@@ -56,11 +56,6 @@ def get_base():
     with _worker_lock:
         return WORKER_POOL[_active_worker_idx % len(WORKER_POOL)]
 
-def _all_workers_limited() -> bool:
-    now = time.time()
-    with _worker_lock:
-        return all(_worker_limited_until.get(w, 0) >= now for w in WORKER_POOL)
-
 def mark_worker_limited(url):
     global _active_worker_idx
     now = time.time()
@@ -74,7 +69,7 @@ def mark_worker_limited(url):
                 switched = True
                 break
     if switched:
-        _log("WORKER", f"rate-limited → pindah ke {get_base()}", Fore.YELLOW)
+        _log("WORKER", f"Rate-limit! Pindah ke: {get_base()}", Fore.YELLOW)
 
 _RATE_LIMIT_MARKERS = (
     "temporarily rate limited", "error 1027", "please check back later",
@@ -86,24 +81,12 @@ def is_worker_blocked(resp) -> bool:
     if resp is None:
         return False
     try:
-        if resp.status_code == 429:
+        if resp.status_code in (429, 403, 503):
             return True
         sample = resp.text[:2000].lower()
         return any(m in sample for m in _RATE_LIMIT_MARKERS)
-    except:
+    except Exception:
         return False
-
-# ----------------------------
-# HELPER HEADERS
-# ----------------------------
-def _recv_headers(base):
-    return {
-        "Accept": "text/html,*/*;q=0.01",
-        "X-Requested-With": "XMLHttpRequest",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Referer": f"{base}/portal/sms/received",
-        "Origin": "https://ivasms.com",
-    }
 
 # ----------------------------
 # SESSION & IVAS AUTH
@@ -121,7 +104,7 @@ def load_cookies():
         if isinstance(data, dict):
             return [data]
     except Exception as e:
-        _log("COOKIE", f"error load: {e}", Fore.RED)
+        _log("COOKIE", f"Error load cookie: {e}", Fore.RED)
     return []
 
 def make_session(cookies: dict):
@@ -131,123 +114,67 @@ def make_session(cookies: dict):
         "Origin": "https://ivasms.com",
         "Referer": "https://ivasms.com/",
     }
-    s = httpx.Client(follow_redirects=True, timeout=25, headers=hdrs)
+    s = httpx.Client(follow_redirects=True, timeout=15, headers=hdrs)
     s.cookies.update(cookies)
     return s
 
-_login_lock = {}
-_login_result = {}
-
-def _get_login_csrf(session, base) -> str:
-    try:
-        r = session.get(f"{base}/login", timeout=15)
-        soup = BeautifulSoup(r.text, "html.parser")
-        meta = soup.find("meta", {"name": "csrf-token"})
-        if meta and meta.get("content"):
-            return meta["content"]
-        inp = soup.find("input", {"name": "_token"})
-        if inp and inp.get("value"):
-            return inp["value"]
-    except Exception:
-        pass
-    return ""
-
-def auto_login_ivas(acc) -> bool:
-    idx = acc["idx"]
-    if not IVAS_USERNAME or not IVAS_PASSWORD:
-        return False
-
-    if idx not in _login_lock:
-        _login_lock[idx] = threading.Lock()
-    if not _login_lock[idx].acquire(blocking=False):
-        _login_lock[idx].acquire()
-        _login_lock[idx].release()
-        return _login_result.get(idx, False)
-
-    try:
-        _log("LOGIN", f"Akun #{idx}: mencoba auto-login...", Fore.YELLOW)
-        base = get_base()
-        csrf = _get_login_csrf(acc["session"], base)
-        if not csrf:
-            _login_result[idx] = False
-            return False
-
-        payload = {"_token": csrf, "email": IVAS_USERNAME, "password": IVAS_PASSWORD}
-        r = acc["session"].post(
-            f"{base}/login",
-            data=payload,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            timeout=20,
-        )
-        success = r.status_code == 200 and "/login" not in str(r.url)
-        if success:
-            _log("LOGIN", f"Akun #{idx}: ✅ Auto-login BERHASIL", Fore.GREEN)
-        _login_result[idx] = success
-        return success
-    except Exception:
-        _login_result[idx] = False
-        return False
-    finally:
-        _login_lock[idx].release()
+def _recv_headers(base):
+    return {
+        "Accept": "text/html,*/*;q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Referer": f"{base}/portal/sms/received",
+        "Origin": "https://ivasms.com",
+    }
 
 # ----------------------------
-# IVAS API FETCHERS
+# IVAS FAST FETCHERS
 # ----------------------------
 _recv_csrf_cache = {}
 
-def get_recv_csrf(acc, _retry=0) -> str:
+def get_recv_csrf(acc) -> str:
     idx = acc["idx"]
     now = time.time()
     cached = _recv_csrf_cache.get(idx)
-    if cached and (now - cached["ts"]) < 900:
+    if cached and (now - cached["ts"]) < 600:
         return cached["csrf"]
     
     base = get_base()
     try:
-        r = acc["session"].get(f"{base}/portal/sms/received", timeout=15)
-        if is_worker_blocked(r) and _retry < len(WORKER_POOL) - 1:
+        r = acc["session"].get(f"{base}/portal/sms/received", timeout=10)
+        if is_worker_blocked(r):
             mark_worker_limited(base)
-            return get_recv_csrf(acc, _retry + 1)
-        if "/login" in str(r.url):
-            if auto_login_ivas(acc):
-                return get_recv_csrf(acc, _retry)
             return acc.get("csrf_token", "")
+            
         soup = BeautifulSoup(r.text, "html.parser")
         meta = soup.find("meta", {"name": "csrf-token"})
         csrf = meta.get("content", "") if meta else ""
+        
         if csrf:
             acc["csrf_token"] = csrf
             _recv_csrf_cache[idx] = {"csrf": csrf, "ts": now}
             return csrf
-    except Exception as e:
+    except Exception:
         pass
     return acc.get("csrf_token", "")
 
-def get_ranges(acc, _retry=0):
+def fetch_active_ranges(acc):
+    """Ambil range yang emang ada SMS/Nomor aktifnya saja"""
     base = get_base()
     today = datetime.now().strftime("%Y-%m-%d")
     csrf = get_recv_csrf(acc)
     
-    _log("DEBUG-RANGE", f"Fetching range... CSRF: {csrf[:10] if csrf else 'NONE'}", Fore.YELLOW)
-    
     try:
         r = acc["session"].post(
             f"{base}/portal/sms/received/getsms",
-            data={"_token": csrf, "from": "2026-01-01", "to": today},
+            data={"_token": csrf, "from": today, "to": today}, # Cukup cek HARI INI biar super kenceng
             headers=_recv_headers(base),
-            timeout=15
+            timeout=10
         )
-        
-        _log("DEBUG-RANGE", f"Response Status: {r.status_code} | Body Len: {len(r.text)}", Fore.CYAN)
-        
         if is_worker_blocked(r):
-            _log("DEBUG-RANGE", "Worker kena Block/Limit!", Fore.RED)
             mark_worker_limited(base)
-            if _all_workers_limited() or _retry >= len(WORKER_POOL) - 1:
-                return []
-            time.sleep(2)
-            return get_ranges(acc, _retry + 1)
-        
+            return []
+            
         soup = BeautifulSoup(r.text, "html.parser")
         ranges = []
         for div in soup.find_all("div", onclick=True):
@@ -256,28 +183,28 @@ def get_ranges(acc, _retry=0):
                     ranges.append(div["onclick"].split("'")[1])
                 except Exception:
                     pass
-                    
-        _log("DEBUG-RANGE", f"Dapet Range: {len(ranges)} buah", Fore.GREEN if ranges else Fore.RED)
         return list(set(ranges))
-        
-    except Exception as e:
-        _log("DEBUG-RANGE", f"Error Fetching Range: {e}", Fore.RED)
+    except Exception:
         return []
 
-def get_numbers(acc, rng):
+def fetch_sms_for_range(acc, rng):
+    """Langsung scan SMS untuk range aktif"""
     base = get_base()
     today = datetime.now().strftime("%Y-%m-%d")
     csrf = get_recv_csrf(acc)
+    
+    # Ambil nomor di range ini
     try:
         r = acc["session"].post(
             f"{base}/portal/sms/received/getsms/number",
             data={"_token": csrf, "start": today, "end": today, "range": rng},
             headers=_recv_headers(base),
-            timeout=15
+            timeout=10
         )
         if is_worker_blocked(r):
             mark_worker_limited(base)
             return []
+
         soup = BeautifulSoup(r.text, "html.parser")
         numbers = []
         for div in soup.find_all("div", onclick=True):
@@ -287,33 +214,31 @@ def get_numbers(acc, rng):
                     numbers.append(val)
             except Exception:
                 pass
-        return list(set(numbers))
-    except Exception:
-        return []
 
-def get_sms(acc, rng, number):
-    base = get_base()
-    today = datetime.now().strftime("%Y-%m-%d")
-    csrf = get_recv_csrf(acc)
-    try:
-        r = acc["session"].post(
-            f"{base}/portal/sms/received/getsms/number/sms",
-            data={"_token": csrf, "start": today, "end": today, "Number": number, "Range": rng},
-            headers=_recv_headers(base),
-            timeout=15
-        )
-        if is_worker_blocked(r):
-            mark_worker_limited(base)
-            return []
-        soup = BeautifulSoup(r.text, "html.parser")
-        sms_texts = []
-        for t in soup.stripped_strings:
-            t = t.strip().replace("<#>", "").strip()
-            if re.fullmatch(r"[A-Za-z0-9]{10,}", t) or "No SMS Found" in t:
+        results = []
+        # Tarik SMS hanya dari nomor yang ada di range aktif
+        for num in numbers:
+            r_sms = acc["session"].post(
+                f"{base}/portal/sms/received/getsms/number/sms",
+                data={"_token": csrf, "start": today, "end": today, "Number": num, "Range": rng},
+                headers=_recv_headers(base),
+                timeout=10
+            )
+            if is_worker_blocked(r_sms):
+                mark_worker_limited(base)
                 continue
-            if t and not any(x in t.lower() for x in ["sender", "revenue", "time"]):
-                sms_texts.append(t)
-        return list(dict.fromkeys(sms_texts))
+
+            soup_sms = BeautifulSoup(r_sms.text, "html.parser")
+            for t in soup_sms.stripped_strings:
+                t = t.strip().replace("<#>", "").strip()
+                if re.fullmatch(r"[A-Za-z0-9]{10,}", t) or "No SMS Found" in t:
+                    continue
+                if t and not any(x in t.lower() for x in ["sender", "revenue", "time"]):
+                    results.append((num, t))
+            
+            time.sleep(0.15) # Jeda mikro anti-limit per nomor
+
+        return results
     except Exception:
         return []
 
@@ -324,7 +249,6 @@ def _get_flag(phone_str):
     cleaned = re.sub(r"\D", "", phone_str)
     if not cleaned:
         return "🌐", "1"
-    
     try:
         parsed = phonenumbers.parse("+" + cleaned, None)
         region = geocoder.region_code_for_number(parsed)
@@ -334,32 +258,23 @@ def _get_flag(phone_str):
             return flag, cc
     except Exception:
         pass
-
     return "🌐", cleaned[:3]
 
 def mask_phone(phone_str):
     cleaned = re.sub(r"\D", "", phone_str)
     if len(cleaned) <= 7:
         return cleaned
-    
-    prefix = cleaned[:4]
-    suffix = cleaned[-4:]
-    return f"+{prefix}🗿{suffix}"
+    return f"+{cleaned[:4]}🗿{cleaned[-4:]}"
 
 def send_telegram(phone, sms_text):
     if not BOT_TOKEN:
         return
 
     sms_clean = sms_text.strip()
-    if any(x in sms_clean.lower() for x in ["sender", "revenue", "time"]):
-        return
-
     m = re.search(r"\b\d{3}[-\s]?\d{3}\b", sms_clean)
-    otp = None
-    
-    if m:
-        otp = m.group(0)
-    else:
+    otp = m.group(0) if m else None
+
+    if not otp:
         candidates = re.findall(r"\b\d{4,8}\b", sms_clean)
         for c in candidates:
             if c != "0120":
@@ -391,76 +306,46 @@ def send_telegram(phone, sms_text):
             },
             timeout=10,
         )
-        _log("OTP", f"Terkirim Telegram: {masked_num} -> {otp}", Fore.GREEN)
+        _log("OTP", f"⚡ OTP KETEMU! {masked_num} -> {otp}", Fore.GREEN)
     except Exception as e:
-        _log("TG-ERR", f"Gagal kirim: {e}", Fore.RED)
+        _log("TG-ERR", f"Gagal forward ke TG: {e}", Fore.RED)
 
 # ----------------------------
-# POLLING SYSTEM & WORKERS
+# POLLING ENGINE (SMART FAST-LANE)
 # ----------------------------
 _sent_cache = set()
 
-def poll_one(acc):
-    found_any = False
-    
-    ranges = get_ranges(acc) 
-    if not ranges:
-        _log("POLL", "Daftar Range KOSONG! Cek login/acc.", Fore.RED)
-        return False
-
-    for rng in ranges:
-        numbers = get_numbers(acc, rng)
-        _log("POLL", f"Mengecek Range: {rng} | Total Nomor: {len(numbers)}", Fore.MAGENTA)
-        
-        for num in numbers:
-            sms_list = get_sms(acc, rng, num)
-            
-            if sms_list:
-                _log("DEBUG-SMS", f"DAPET SMS di No {num}: {sms_list}", Fore.GREEN)
-                for sms in sms_list:
-                    sms_clean = sms.strip()
-                    cache_key = f"{num}:{sms_clean}"
-                    if cache_key not in _sent_cache:
-                        _sent_cache.add(cache_key)
-                        send_telegram(num, sms_clean)
-                        found_any = True
-            
-            time.sleep(0.3)
-
-    return found_any    
-
 def account_worker(acc):
-    consecutive_limits = 0
-    _log("WORKER", "Loop polling dimulai...", Fore.GREEN)
+    _log("WORKER", "⚡ FAST-LANE Engine Aktif! Siap narik OTP...", Fore.GREEN)
     
     while True:
         try:
-            if _all_workers_limited():
-                consecutive_limits += 1
-                _log("WORKER", f"Semua worker rate-limit ({consecutive_limits}). Coba reset...", Fore.YELLOW)
-                time.sleep(15)
-
-                if hasattr(acc, 'workers'):
-                    for w in acc.workers:
-                        w.is_limited = False
-                        w.limit_until = 0
-                elif isinstance(acc, dict) and 'workers' in acc:
-                    for w in acc['workers']:
-                        w['is_limited'] = False
-                        w['limit_until'] = 0
+            # 1. Tarik HANYA range yang ada traffic SMS hari ini
+            active_ranges = fetch_active_ranges(acc)
+            
+            if not active_ranges:
+                _log("POLL", "Belum ada SMS baru masuk hari ini. Menunggu...", Fore.CYAN)
+                time.sleep(2.5)  # Jeda aman kalau lagi sepi
                 continue
 
-            _log("WORKER", "Sedang nge-poll nomor...", Fore.CYAN)
-            found = poll_one(acc)
-            _log("WORKER", f"Selesai poll. Found: {found}", Fore.BLUE)
-            
-            sleep_time = 1.5 if found else 3.0
+            found_new = False
+            for rng in active_ranges:
+                sms_items = fetch_sms_for_range(acc, rng)
+                for num, sms in sms_items:
+                    cache_key = f"{num}:{sms.strip()}"
+                    if cache_key not in _sent_cache:
+                        _sent_cache.add(cache_key)
+                        send_telegram(num, sms)
+                        found_new = True
+
+            # Jika dapet OTP baru, langsung hajar poll lagi tanpa delay.
+            # Kalau sepi, kasih delay 1.5 - 2 detik biar bebas dari 429.
+            sleep_time = 0.5 if found_new else 2.0
+            time.sleep(sleep_time)
 
         except Exception as e:
-            _log("WORKER-ERR", f"Error di loop: {e}", Fore.RED)
-            sleep_time = 3.0
-
-        time.sleep(sleep_time)
+            _log("WORKER-ERR", f"Error loop: {e}", Fore.RED)
+            time.sleep(3.0)
 
 # ----------------------------
 # RAILWAY HEALTHCHECK DUMMY SERVER
@@ -485,7 +370,6 @@ def run_health_server():
 # ----------------------------
 def main():
     _log("SYSTEM", "Memulai Bot...", Fore.GREEN)
-
     threading.Thread(target=run_health_server, daemon=True).start()
 
     cookies_list = load_cookies()
@@ -508,4 +392,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
+    
