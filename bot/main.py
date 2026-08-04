@@ -91,7 +91,8 @@ WORKER_POOL = [
 _worker_lock          = threading.Lock()
 _active_worker_idx    = 0
 _worker_limited_until = {}
-WORKER_LIMIT_COOLDOWN = 900   # 15 menit
+WORKER_LIMIT_COOLDOWN = 120   # Cukup 2 menit aja!
+
 
 import random
 
@@ -115,7 +116,8 @@ def mark_worker_limited(url):
                 _active_worker_idx = idx
                 break
     _log("WORKER", f"rate-limited → pindah ke {get_base()}", Fore.YELLOW)
-
+    time.sleep(0.5)  # <--- TAMBAHKAN BARIS INI BIAR GAK NGESPAM LOG
+    
 _RATE_LIMIT_MARKERS = (
     "temporarily rate limited", "error 1027", "please check back later",
     "has been rate limited", "error 1015", "you have been blocked",
