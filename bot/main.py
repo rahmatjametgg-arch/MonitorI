@@ -232,18 +232,25 @@ def _recv_headers(base):
 
 def get_ranges(acc, _retry=0):
     base = get_base()
+    # Opsional: Bikin range tanggal lebih luas (3 hari ke belakang) biar gak ke-skip
     today = datetime.now().strftime("%Y-%m-%d")
     csrf = get_recv_csrf(acc)
+    
+    _log("DEBUG-RANGE", f"Fetching range... CSRF: {csrf[:10] if csrf else 'NONE'}", Fore.YELLOW)
+    
     try:
         r = acc["session"].post(
-    f"{base}/portal/sms/received/getsms",
-    data={"_token": csrf, "from": today, "to": today},
-    headers=_recv_headers(base),
-    proxies=get_proxy(),
-    timeout=10
+            f"{base}/portal/sms/received/getsms",
+            data={"_token": csrf, "from": "2026-01-01", "to": today}, # Ambil dari awal tahun/rentang luas
+            headers=_recv_headers(base),
+            proxies=get_proxy(),
+            timeout=10
         )
         
+        _log("DEBUG-RANGE", f"Response Status: {r.status_code} | Body Len: {len(r.text)}", Fore.CYAN)
+        
         if is_worker_blocked(r):
+            _log("DEBUG-RANGE", "Worker kena Block/Limit!", Fore.RED)
             mark_worker_limited(base)
             if _all_workers_limited() or _retry >= len(WORKER_POOL) - 1:
                 return []
@@ -256,12 +263,16 @@ def get_ranges(acc, _retry=0):
             if "toggleRange" in div["onclick"]:
                 try:
                     ranges.append(div["onclick"].split("'")[1])
-                except:
+                except Exception as ex:
                     pass
+                    
+        _log("DEBUG-RANGE", f"Dapet Range: {len(ranges)} buah", Fore.GREEN if ranges else Fore.RED)
         return list(set(ranges))
-    except:
+        
+    except Exception as e:
+        _log("DEBUG-RANGE", f"Error Fetching Range: {e}", Fore.RED)
         return []
-
+        
 def get_numbers(acc, rng):
     base = get_base()
     today = datetime.now().strftime("%Y-%m-%d")
