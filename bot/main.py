@@ -449,7 +449,7 @@ def account_worker(acc):
                         if "data:" in decoded:
                             msg_data = decoded.replace("data:", "").strip()
                             if msg_data:
-                                send_telegram("SYSTEM", f"📩 **LIVE SMS REALTIME!**\n\n{msg_data}")
+                                send_telegram(f"📩 **LIVE SMS REALTIME!**\n\n{msg_data}")
                                 _log("LIVE-STREAM", "SMS Baru Masuk & Terkirim!", Fore.GREEN)
         except Exception as e:
             _log("STREAM-ERR", f"Koneksi terputus, nyoba reconnect lagi... ({e})", Fore.YELLOW)
