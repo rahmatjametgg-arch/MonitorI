@@ -200,51 +200,49 @@ def get_recv_csrf(acc, _retry=0) -> str:
     cached = _recv_csrf_cache.get(idx)
     if cached and (now - cached["ts"]) < 900:
         return cached["csrf"]
-    base = get_base()
+    
+    # Nembak langsung ke IVAS utama buat dapet CSRF
+    url = "https://ivasms.com/portal/sms/received"
     try:
-        r = acc["session"].get(f"{base}/portal/sms/received", timeout=15)
-        if is_worker_blocked(r) and _retry < len(WORKER_POOL) - 1:
-            mark_worker_limited(base)
-            return get_recv_csrf(acc, _retry + 1)
+        r = acc["session"].get(url, timeout=15)
         if "/login" in str(r.url):
             if auto_login_ivas(acc):
                 return get_recv_csrf(acc, _retry)
             return acc.get("csrf_token", "")
+            
         soup = BeautifulSoup(r.text, "html.parser")
         meta = soup.find("meta", {"name": "csrf-token"})
         csrf = meta.get("content", "") if meta else ""
+        
+        if not csrf:
+            inp = soup.find("input", {"name": "_token"})
+            if inp and inp.get("value"):
+                csrf = inp["value"]
+
         if csrf:
             acc["csrf_token"] = csrf
             _recv_csrf_cache[idx] = {"csrf": csrf, "ts": now}
             return csrf
     except Exception as e:
-        pass
+        _log("CSRF-ERR", f"Gagal dapet CSRF: {e}", Fore.RED)
+        
     return acc.get("csrf_token", "")
 
-def _recv_headers(base):
-    return {
-        "Accept": "text/html,*/*;q=0.01",
-        "X-Requested-With": "XMLHttpRequest",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Referer": f"{base}/portal/sms/received",
-        "Origin": "https://ivasms.com",
-    }
 
 def get_ranges(acc, _retry=0):
     base = get_base()
-    # Opsional: Bikin range tanggal lebih luas (3 hari ke belakang) biar gak ke-skip
     today = datetime.now().strftime("%Y-%m-%d")
     csrf = get_recv_csrf(acc)
     
     _log("DEBUG-RANGE", f"Fetching range... CSRF: {csrf[:10] if csrf else 'NONE'}", Fore.YELLOW)
     
     try:
+        # PERBAIKAN: Hapus parameter proxies=get_proxy() yang bikin crash di httpx
         r = acc["session"].post(
             f"{base}/portal/sms/received/getsms",
-            data={"_token": csrf, "from": "2026-01-01", "to": today}, # Ambil dari awal tahun/rentang luas
+            data={"_token": csrf, "from": "2026-01-01", "to": today},
             headers=_recv_headers(base),
-            proxies=get_proxy(),
-            timeout=10
+            timeout=15
         )
         
         _log("DEBUG-RANGE", f"Response Status: {r.status_code} | Body Len: {len(r.text)}", Fore.CYAN)
@@ -263,7 +261,7 @@ def get_ranges(acc, _retry=0):
             if "toggleRange" in div["onclick"]:
                 try:
                     ranges.append(div["onclick"].split("'")[1])
-                except Exception as ex:
+                except Exception:
                     pass
                     
         _log("DEBUG-RANGE", f"Dapet Range: {len(ranges)} buah", Fore.GREEN if ranges else Fore.RED)
@@ -272,6 +270,7 @@ def get_ranges(acc, _retry=0):
     except Exception as e:
         _log("DEBUG-RANGE", f"Error Fetching Range: {e}", Fore.RED)
         return []
+        
         
 def get_numbers(acc, rng):
     base = get_base()
