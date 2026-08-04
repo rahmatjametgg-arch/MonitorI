@@ -433,35 +433,28 @@ def poll_one(acc):
     return found_any
 
 def account_worker(acc):
-    consecutive_limits = 0
+    url = "https://ivasms.com/portal/live/stream"
+    headers = _recv_headers("https://ivasms.com")
+    headers["Accept"] = "text/event-stream"
+    
+    _log("LIVE-STREAM", "Bot anteng nunggu stream SMS masuk (Zero Refresh)...", Fore.CYAN)
+    
     while True:
         try:
-            # Jika semua worker kena limit/blocked, paksa reset statusnya tiap 15 detik!
-            if _all_workers_limited():
-                consecutive_limits += 1
-                _log("WORKER", f"Semua worker rate-limit ({consecutive_limits}). Coba reset & retry...", Fore.YELLOW)
-                
-                time.sleep(15)
-                
-                # Paksa buka gembok status limited worker biar mau nyoba request ulang
-                if hasattr(acc, 'workers'):
-                    for w in acc.workers:
-                        w.is_limited = False
-                        w.limit_until = 0
-                elif isinstance(acc, dict) and 'workers' in acc:
-                    for w in acc['workers']:
-                        w['is_limited'] = False
-                        w['limit_until'] = 0
-                continue
-
-            # Jalankan polling biasa (Jeda aman dari Cloudflare)
-            found = poll_one(acc)
-            sleep_time = 1.5 if found else 3.0
-
+            # Buka koneksi stream persisten (cuma nembak 1x, nunggu SMS disundul server)
+            with acc["session"].get(url, headers=headers, stream=True, timeout=90) as r:
+                for line in r.iter_lines():
+                    if line:
+                        decoded = line.decode('utf-8', errors='ignore')
+                        if "data:" in decoded:
+                            msg_data = decoded.replace("data:", "").strip()
+                            if msg_data:
+                                send_telegram("SYSTEM", f"📩 **LIVE SMS REALTIME!**\n\n{msg_data}")
+                                _log("LIVE-STREAM", "SMS Baru Masuk & Terkirim!", Fore.GREEN)
         except Exception as e:
-            sleep_time = 3.0
-
-        time.sleep(sleep_time)
+            _log("STREAM-ERR", f"Koneksi terputus, nyoba reconnect lagi... ({e})", Fore.YELLOW)
+            time.sleep(5)
+            
     
 # ----------------------------
 # RAILWAY HEALTHCHECK DUMMY SERVER
