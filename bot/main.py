@@ -424,7 +424,7 @@ def account_worker(acc):
             # Jika worker kena rate-limit, tahan dulu dengan durasi naik bertahap
             if _all_workers_limited():
                 consecutive_limits += 1
-                wait_time = min(10 * consecutive_limits, 60)
+                wait_time = min(5 * consecutive_limits, 20)
                 _log("WORKER", f"Rate-limited! Istirahat {wait_time} detik...", Fore.YELLOW)
                 time.sleep(wait_time)
                 continue
@@ -435,7 +435,7 @@ def account_worker(acc):
             found = poll_one(acc)
             
             # Kalo nemu SMS jeda 1 detik, kalo sepi jeda 2.5 detik
-            sleep_time = 1.0 if found else 2.5
+            sleep_time = 1.8 if found else 2.5
 
         except Exception as e:
             sleep_time = 4.0
