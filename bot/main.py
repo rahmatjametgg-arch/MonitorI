@@ -421,30 +421,37 @@ def account_worker(acc):
     consecutive_limits = 0
     while True:
         try:
-            # Jika worker kena rate-limit, tahan dulu dengan durasi naik bertahap
+            # Jika semua worker terdeteksi limit
             if _all_workers_limited():
                 consecutive_limits += 1
-                wait_time = min(5 * consecutive_limits, 20)
-                _log("WORKER", f"Rate-limited! Istirahat {wait_time} detik...", Fore.YELLOW)
-                time.sleep(wait_time)
+                _log("WORKER", f"Semua worker rate-limit ({consecutive_limits}). Coba reset & rotated...", Fore.YELLOW)
+                
+                # Istirahat sebentar (15 detik)
+                time.sleep(15)
+                
+                # PAKSA RESET status limit worker biar dia mau nyoba request ulang!
+                if hasattr(acc, 'workers'):
+                    for w in acc.workers:
+                        w.is_limited = False
+                        w.limit_until = 0
+                elif isinstance(acc, dict) and 'workers' in acc:
+                    for w in acc['workers']:
+                        w['is_limited'] = False
+                        w['limit_until'] = 0
                 continue
             
-            # Reset counter kalau udah aman
             consecutive_limits = 0
 
+            # Polling dengan delay yang AMAN dari Cloudflare
             found = poll_one(acc)
-            
-            # Kalo nemu SMS jeda 1 detik, kalo sepi jeda 2.5 detik
-            sleep_time = 1.8 if found else 2.5
+            sleep_time = 1.5 if found else 3.0
 
         except Exception as e:
             sleep_time = 4.0
 
         time.sleep(sleep_time)
-        
-
-        
-
+    
+    
 # ----------------------------
 # RAILWAY HEALTHCHECK DUMMY SERVER
 # ----------------------------
