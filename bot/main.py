@@ -442,9 +442,18 @@ def account_worker(acc):
         try:
             # Panggil GET biasa tanpa stream=True
             r = acc["session"].get(url, headers=headers, timeout=10)
-            if r.status_code == 200:
-                # Kalo ada text SMS baru bisa di-process di sini
-                pass
+                                    if r.status_code == 200:
+                soup = BeautifulSoup(r.text, "html.parser")
+                rows = soup.find_all("tr")
+                for row in rows:
+                    cols = [td.text.strip() for td in row.find_all("td")]
+                    if len(cols) >= 5:
+                        sid, msg = cols[1], cols[4]
+                        if sid and sid not in _sent_cache:
+                            _sent_cache.add(sid)
+                            send_telegram(f"📩 **LIVE SMS REALTIME!**\n\n**SID:** `{sid}`\n**Pesan:** {msg}")
+                            _log("LIVE-SMS", f"SMS Masuk & Forwarded! SID: {sid}", Fore.GREEN)
+                            
         except Exception as e:
             _log("SMS-ERR", f"Error: {e}", Fore.YELLOW)
             
