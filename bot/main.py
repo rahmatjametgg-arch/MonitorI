@@ -443,15 +443,14 @@ def account_worker(acc):
     consecutive_limits = 0
     while True:
         try:
-            # Jika semua worker terdeteksi limit
+            # Jika semua worker kena limit/blocked, paksa reset statusnya tiap 15 detik!
             if _all_workers_limited():
                 consecutive_limits += 1
-                _log("WORKER", f"Semua worker rate-limit ({consecutive_limits}). Coba reset & rotated...", Fore.YELLOW)
+                _log("WORKER", f"Semua worker rate-limit ({consecutive_limits}). Coba reset & retry...", Fore.YELLOW)
                 
-                # Istirahat sebentar (15 detik)
                 time.sleep(15)
                 
-                # PAKSA RESET status limit worker biar dia mau nyoba request ulang!
+                # Paksa buka gembok status limited worker biar mau nyoba request ulang
                 if hasattr(acc, 'workers'):
                     for w in acc.workers:
                         w.is_limited = False
@@ -461,18 +460,15 @@ def account_worker(acc):
                         w['is_limited'] = False
                         w['limit_until'] = 0
                 continue
-            
-            consecutive_limits = 0
 
-            # Polling dengan delay yang AMAN dari Cloudflare
+            # Jalankan polling biasa (Jeda aman dari Cloudflare)
             found = poll_one(acc)
             sleep_time = 1.5 if found else 3.0
 
         except Exception as e:
-            sleep_time = 4.0
+            sleep_time = 3.0
 
         time.sleep(sleep_time)
-    
     
 # ----------------------------
 # RAILWAY HEALTHCHECK DUMMY SERVER
