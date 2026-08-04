@@ -1,6 +1,6 @@
 """
 SPIDERMAT OTP BOT — FORWARD MODE
-Clean UI & Anti Rate-Limit Log Spam
+Full Clean & Restructured Code
 """
 
 import httpx
@@ -17,24 +17,14 @@ import phonenumbers
 from phonenumbers import geocoder
 from colorama import init, Fore, Style
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import random
 
-# ==========================================
-# LANGKAH 1: KONFIGURASI PROXY SAUDI ARABIA
-# ==========================================
-PROXIES = [
-    "http://mob-sa:pgw-631c2bb4e0cc4ee1f1368b16ed7770ff28872b8f9fb92b69@gw.proxyrise.com:443"
-]
-
-def get_proxy():
-    return None
+# ----------------------------
+# BASIC SETUP
+# ----------------------------
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 init(autoreset=True)
 
-# ----------------------------
-# CONFIGURATION
-# ----------------------------
 BOT_TOKEN     = os.getenv("BOT_TOKEN", "")
 IVAS_USERNAME = os.getenv("IVAS_USERNAME", "")
 IVAS_PASSWORD = os.getenv("IVAS_PASSWORD", "")
@@ -42,12 +32,10 @@ DEFAULT_TARGET = -1003686221386
 
 CHANNEL_LINK  = "https://t.me/matchaappp"
 COOKIE_FILE   = "cookie.json"
-
-MIN_IDLE_SLEEP = 2.0
 WORKER_LIMIT_COOLDOWN = 900
 
 # ----------------------------
-# WORKER POOL
+# WORKER POOL & LOGGING
 # ----------------------------
 WORKER_POOL = [
     "https://plain-butterfly-d9e9.kicenivas.workers.dev",
@@ -104,7 +92,20 @@ def is_worker_blocked(resp) -> bool:
         return any(m in sample for m in _RATE_LIMIT_MARKERS)
     except:
         return False
-    # ----------------------------
+
+# ----------------------------
+# HELPER HEADERS
+# ----------------------------
+def _recv_headers(base):
+    return {
+        "Accept": "text/html,*/*;q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Referer": f"{base}/portal/sms/received",
+        "Origin": "https://ivasms.com",
+    }
+
+# ----------------------------
 # SESSION & IVAS AUTH
 # ----------------------------
 def load_cookies():
@@ -147,7 +148,7 @@ def _get_login_csrf(session, base) -> str:
         inp = soup.find("input", {"name": "_token"})
         if inp and inp.get("value"):
             return inp["value"]
-    except Exception as e:
+    except Exception:
         pass
     return ""
 
@@ -183,7 +184,7 @@ def auto_login_ivas(acc) -> bool:
             _log("LOGIN", f"Akun #{idx}: ✅ Auto-login BERHASIL", Fore.GREEN)
         _login_result[idx] = success
         return success
-    except Exception as e:
+    except Exception:
         _login_result[idx] = False
         return False
     finally:
@@ -201,33 +202,26 @@ def get_recv_csrf(acc, _retry=0) -> str:
     if cached and (now - cached["ts"]) < 900:
         return cached["csrf"]
     
-    # Nembak langsung ke IVAS utama buat dapet CSRF
-    url = "https://ivasms.com/portal/sms/received"
+    base = get_base()
     try:
-        r = acc["session"].get(url, timeout=15)
+        r = acc["session"].get(f"{base}/portal/sms/received", timeout=15)
+        if is_worker_blocked(r) and _retry < len(WORKER_POOL) - 1:
+            mark_worker_limited(base)
+            return get_recv_csrf(acc, _retry + 1)
         if "/login" in str(r.url):
             if auto_login_ivas(acc):
                 return get_recv_csrf(acc, _retry)
             return acc.get("csrf_token", "")
-            
         soup = BeautifulSoup(r.text, "html.parser")
         meta = soup.find("meta", {"name": "csrf-token"})
         csrf = meta.get("content", "") if meta else ""
-        
-        if not csrf:
-            inp = soup.find("input", {"name": "_token"})
-            if inp and inp.get("value"):
-                csrf = inp["value"]
-
         if csrf:
             acc["csrf_token"] = csrf
             _recv_csrf_cache[idx] = {"csrf": csrf, "ts": now}
             return csrf
     except Exception as e:
-        _log("CSRF-ERR", f"Gagal dapet CSRF: {e}", Fore.RED)
-        
+        pass
     return acc.get("csrf_token", "")
-
 
 def get_ranges(acc, _retry=0):
     base = get_base()
@@ -237,7 +231,6 @@ def get_ranges(acc, _retry=0):
     _log("DEBUG-RANGE", f"Fetching range... CSRF: {csrf[:10] if csrf else 'NONE'}", Fore.YELLOW)
     
     try:
-        # PERBAIKAN: Hapus parameter proxies=get_proxy() yang bikin crash di httpx
         r = acc["session"].post(
             f"{base}/portal/sms/received/getsms",
             data={"_token": csrf, "from": "2026-01-01", "to": today},
@@ -270,19 +263,17 @@ def get_ranges(acc, _retry=0):
     except Exception as e:
         _log("DEBUG-RANGE", f"Error Fetching Range: {e}", Fore.RED)
         return []
-        
-        
+
 def get_numbers(acc, rng):
     base = get_base()
     today = datetime.now().strftime("%Y-%m-%d")
     csrf = get_recv_csrf(acc)
     try:
         r = acc["session"].post(
-    f"{base}/portal/sms/received/getsms/number",
-    data={"_token": csrf, "start": today, "end": today, "range": rng},
-    headers=_recv_headers(base),
-    proxies=get_proxy(),
-    timeout=10
+            f"{base}/portal/sms/received/getsms/number",
+            data={"_token": csrf, "start": today, "end": today, "range": rng},
+            headers=_recv_headers(base),
+            timeout=15
         )
         if is_worker_blocked(r):
             mark_worker_limited(base)
@@ -294,10 +285,10 @@ def get_numbers(acc, rng):
                 val = div["onclick"].split("'")[1]
                 if val and val != rng:
                     numbers.append(val)
-            except:
+            except Exception:
                 pass
         return list(set(numbers))
-    except:
+    except Exception:
         return []
 
 def get_sms(acc, rng, number):
@@ -309,6 +300,7 @@ def get_sms(acc, rng, number):
             f"{base}/portal/sms/received/getsms/number/sms",
             data={"_token": csrf, "start": today, "end": today, "Number": number, "Range": rng},
             headers=_recv_headers(base),
+            timeout=15
         )
         if is_worker_blocked(r):
             mark_worker_limited(base)
@@ -322,9 +314,10 @@ def get_sms(acc, rng, number):
             if t and not any(x in t.lower() for x in ["sender", "revenue", "time"]):
                 sms_texts.append(t)
         return list(dict.fromkeys(sms_texts))
-    except:
+    except Exception:
         return []
-    # ----------------------------
+
+# ----------------------------
 # TELEGRAM FORWARDER
 # ----------------------------
 def _get_flag(phone_str):
@@ -339,7 +332,7 @@ def _get_flag(phone_str):
         if region and len(region) == 2:
             flag = chr(ord(region[0]) + 127397) + chr(ord(region[1]) + 127397)
             return flag, cc
-    except:
+    except Exception:
         pass
 
     return "🌐", cleaned[:3]
@@ -357,26 +350,22 @@ def send_telegram(phone, sms_text):
     if not BOT_TOKEN:
         return
 
-    # Abaikan teks bawaan IVAS/header jam
     sms_clean = sms_text.strip()
     if any(x in sms_clean.lower() for x in ["sender", "revenue", "time"]):
         return
 
-    # 1. Cari OTP format XXX-XXX atau 6 digit
     m = re.search(r"\b\d{3}[-\s]?\d{3}\b", sms_clean)
     otp = None
     
     if m:
         otp = m.group(0)
     else:
-        # 2. Jika tidak ada, cari angka 4-8 digit TAPI BUKAN 0120
         candidates = re.findall(r"\b\d{4,8}\b", sms_clean)
         for c in candidates:
             if c != "0120":
                 otp = c
                 break
 
-    # Kalo tetep bernilai 0120 / None -> STOP!
     if not otp or otp == "0120":
         return
 
@@ -407,15 +396,13 @@ def send_telegram(phone, sms_text):
         _log("TG-ERR", f"Gagal kirim: {e}", Fore.RED)
 
 # ----------------------------
-# POLLING SYSTEM & WORKERS (FAST LANE)
+# POLLING SYSTEM & WORKERS
 # ----------------------------
 _sent_cache = set()
-_active_numbers_cache = {}  # Priority tracker untuk nomor yang aktif
 
 def poll_one(acc):
     found_any = False
     
-    # Ambil range active dari acc
     ranges = get_ranges(acc) 
     if not ranges:
         _log("POLL", "Daftar Range KOSONG! Cek login/acc.", Fore.RED)
@@ -428,7 +415,6 @@ def poll_one(acc):
         for num in numbers:
             sms_list = get_sms(acc, rng, num)
             
-            # INTIP RESPON SMS:
             if sms_list:
                 _log("DEBUG-SMS", f"DAPET SMS di No {num}: {sms_list}", Fore.GREEN)
                 for sms in sms_list:
@@ -439,7 +425,7 @@ def poll_one(acc):
                         send_telegram(num, sms_clean)
                         found_any = True
             
-            time.sleep(0.3) # Jeda aman per nomor
+            time.sleep(0.3)
 
     return found_any    
 
@@ -475,7 +461,7 @@ def account_worker(acc):
             sleep_time = 3.0
 
         time.sleep(sleep_time)
-                      
+
 # ----------------------------
 # RAILWAY HEALTHCHECK DUMMY SERVER
 # ----------------------------
@@ -522,4 +508,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+        
