@@ -323,41 +323,33 @@ def get_numbers(acc, rng, _retry=0):
             pass
     return list(set(numbers))
 
-def get_sms(acc, rng, number, _retry=0):
-    base          = get_base()
-    today         = datetime.now().strftime("%Y-%m-%d")
-    csrf          = get_recv_csrf(acc)
-    worker_before = base
-    r = acc["session"].post(
-        f"{base}/portal/sms/received/getsms/number/sms",
-        data={"_token": csrf, "start": today, "end": today, "Number": number, "Range": rng},
-        headers=_recv_headers(base),
-    )
-    if is_worker_blocked(r) and _retry < len(WORKER_POOL) - 1:
-        mark_worker_limited(worker_before)
-        return get_sms(acc, rng, number, _retry + 1)
-    if r.status_code == 429 or "/login" in str(r.url):
-        return []
-    soup      = BeautifulSoup(r.text, "html.parser")
-    sms_texts = []
+def get_sms(acc: dict, rng: str, number: str) -> list:
+    """Ambil daftar SMS dari portal untuk nomor tertentu (hanya 2 SMS terbaru)."""
+    url = f"{get_base()}/api/sms"
+    params = {
+        "key": acc["key"],
+        "range": rng,
+        "number": number
+    }
+    
     try:
-        for t in soup.stripped_strings:
-            t = t.strip().replace("<#>", "").strip()
-            if re.fullmatch(r"[A-Za-z0-9]{10,}", t):
-                continue
-            t_low = t.lower()
-            if any(x in t_low for x in ["sender", "revenue", "time"]):
-                continue
-            if re.search(r"\b\d{2}:\d{2}:\d{2}\b", t):
-                continue
-            if "$" in t:
-                continue
-            if t and "No SMS Found" not in t:
-                sms_texts.append(t)
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code == 429:
+            mark_worker_limited(get_base())
+            return []
+            
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, list):
+                # Ambil 2 SMS paling atas/terbaru saja
+                return data[:2]
+            elif isinstance(data, dict) and "sms" in data:
+                return data["sms"][:2]
     except Exception as e:
-        _log("SMS", f"parse error: {e}", Fore.RED)
-    return list(dict.fromkeys(sms_texts))
-
+        _log("SMS-ERR", f"error get_sms {number}: {e}", Fore.RED)
+        
+    return []
+    
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PLATFORM DETECTION  (emoji + nama lengkap)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -741,7 +733,7 @@ _OTP_RE = re.compile(r"\b\d{3}[- ]?\d{3}\b")
 
 def poll_one(acc) -> bool:
     """Ambil semua SMS baru dari satu akun. Return True jika ada OTP terkirim."""
-    found  = False
+    found = False
     ranges = []
     try:
         ranges = get_ranges_cached(acc)
@@ -750,6 +742,7 @@ def poll_one(acc) -> bool:
         return False
 
     def process_number(rng, num, fallback_country, code):
+        time.sleep(0.3)  # Jeda tipis agar tidak terkena rate limit
         full_num = normalize_number(num, code)
         if not full_num.isdigit():
             return False
@@ -763,7 +756,7 @@ def poll_one(acc) -> bool:
         local_found = False
         for sms in sms_list:
             clean = re.sub(r"\s+", " ", sms.replace("<#>", "")).strip()
-            uid   = hashlib.md5(f"{num}-{clean}".encode()).hexdigest()
+            uid = hashlib.md5(f"{num}-{clean}".encode()).hexdigest()
 
             with _sent_cache_lock:
                 if uid in sent_cache:
@@ -773,19 +766,19 @@ def poll_one(acc) -> bool:
             if not matches:
                 continue
 
-            otp                       = re.sub(r"[^0-9]", "", matches[0])
-            svc                       = detect_service(sms)
+            otp = re.sub(r"[^0-9]", "", matches[0])
+            svc = detect_service(sms)
             country, flag, region_code = detect_country_and_flag(full_num, fallback_country)
-            masked                    = mask_phone(full_num)
+            masked = mask_phone(full_num)
 
-            msg = build_otp_message(otp, svc, flag, country, region_code, masked)
+            msg = build_otp_message(otp, svc, flag, country, region_code, masked, full_num)
             tg_send_otp(otp, msg)
             cache_add(uid)
 
             _log(
                 "OTP",
-                f"{svc['icon']} {svc['name']:<10}  {flag} {region_code}  "
-                f"{masked}  →  {otp}",
+                f"{svc['icon']} {svc['name']:<10} {flag} {region_code} "
+                f"{masked} -> {otp}",
                 Fore.GREEN,
             )
             local_found = True
@@ -799,11 +792,13 @@ def poll_one(acc) -> bool:
         except Exception as e:
             _log("NUM", f"akun #{acc['idx']}: {e}", Fore.YELLOW)
             continue
+
         if not numbers:
             continue
-        n_workers = min(5, len(numbers))
-        with ThreadPoolExecutor(max_workers=n_workers, thread_name_prefix="sms") as pool:
-            futs = {pool.submit(process_number, rng, n, fallback_country, code): n for n in numbers}
+
+        n_workers = min(3, len(numbers))
+        with ThreadPoolExecutor(max_workers=n_workers, thread_name_prefix="sms") as executor:
+            futs = [executor.submit(process_number, rng, n, fallback_country, code) for n in numbers]
             for fut in as_completed(futs):
                 try:
                     if fut.result():
@@ -812,7 +807,7 @@ def poll_one(acc) -> bool:
                     _log("NUM", f"akun #{acc['idx']}: {e}", Fore.YELLOW)
 
     return found
-
+    
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # ACCOUNT WORKER  (polling loop per akun)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
