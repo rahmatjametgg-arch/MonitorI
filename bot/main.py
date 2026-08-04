@@ -838,10 +838,13 @@ def account_worker(acc):
     while True:
         try:
             found = poll_one(acc)
-            # Kalau dapet OTP, langsung tembak lagi tanpa jeda (0.0s)
-            # Kalau gak dapet, jeda perlahan naik (2s -> 2.5s -> 3s dst, max POLL_INTERVAL_MAX)
             sleep_time = 0.0 if found else min(sleep_time + 0.5, POLL_INTERVAL_MAX)
-            
+        except Exception as e:
+            _log("WORKER", f"error akun #{acc.get('idx')}: {e}", Fore.RED)
+            sleep_time = 5.0
+        
+        time.sleep(sleep_time)
+        
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # KEEPALIVE  (ping /portal agar session tidak expire)
