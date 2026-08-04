@@ -433,42 +433,32 @@ def poll_one(acc):
     return found_any
 
 def account_worker(acc):
-    url = "https://ivasms.com/portal/live/my_sms"
-    headers = _recv_headers("https://ivasms.com")
-
-    _log("LIVE-SMS", "Bot anteng mantau Live SMS...", Fore.CYAN)
-
+    consecutive_limits = 0
     while True:
         try:
-            r = acc["session"].get(url, headers=headers, timeout=10)
-            
-            # Print status biar tau respon server IVAS
-            _log("CHECK", f"Status: {r.status_code} | Len Response: {len(r.text)}", Fore.MAGENTA)
-            
-            if r.status_code == 200:
-                soup = BeautifulSoup(r.text, "html.parser")
-                rows = soup.find_all("tr")
-                
-                # Kalo misal responnya JSON bukan HTML:
-                # try:
-                #     data = r.json()
-                #     _log("DATA-JSON", str(data)[:100], Fore.YELLOW)
-                # except: pass
+            if _all_workers_limited():
+                consecutive_limits += 1
+                _log("WORKER", f"Semua worker rate-limit ({consecutive_limits}). Coba reset & retry...", Fore.YELLOW)
+                time.sleep(15)
 
-                for row in rows:
-                    cols = [td.text.strip() for td in row.find_all("td")]
-                    if len(cols) >= 5:
-                        sid, msg = cols[1], cols[4]
-                        if sid and sid not in _sent_cache:
-                            _sent_cache.add(sid)
-                            send_telegram(f"📩 **LIVE SMS REALTIME!**\n\n**SID:** `{sid}`\n**Pesan:** {msg}")
-                            _log("LIVE-SMS", f"SMS Masuk & Forwarded! SID: {sid}", Fore.GREEN)
+                if hasattr(acc, 'workers'):
+                    for w in acc.workers:
+                        w.is_limited = False
+                        w.limit_until = 0
+                elif isinstance(acc, dict) and 'workers' in acc:
+                    for w in acc['workers']:
+                        w['is_limited'] = False
+                        w['limit_until'] = 0
+                continue
+
+            found = poll_one(acc)
+            sleep_time = 1.5 if found else 3.0
 
         except Exception as e:
-            _log("SMS-ERR", f"Error: {e}", Fore.YELLOW)
+            sleep_time = 3.0
 
-        time.sleep(3)
-        
+        time.sleep(sleep_time)
+              
 # ----------------------------
 # RAILWAY HEALTHCHECK DUMMY SERVER
 # ----------------------------
