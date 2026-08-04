@@ -438,15 +438,16 @@ def build_otp_message(
     region_code: str,
     masked_num:  str,
 ) -> str:
-    # Format ala Foto 2: Bendera + Icon Service + Nomor
-    # Contoh: 🇹🇬 #TG 💬 +228-SPDRMT-5032 🔴
-    # @ Prefix: <OTP>
+    svc_tag = svc.get('short', '#OTP')
+    svc_icon = svc.get('icon', '💬')
     
-    svc_tag = f"#{svc.get('code', 'OTP').upper()}"
+    # Gunakan tag <tg-spoiler> agar teks sensor berdebu
+    # Saat di-tap user, baru kebuka angkanya!
     return (
-        f"{flag} <b>{svc_tag}</b> {svc.get('icon', '💬')} <code>{masked_num}</code> 🔴\n"
-        f"@ <b>Prefix:</b> <code>{otp}</code>"
+        f"{flag} <b>{svc_tag}</b> {svc_icon} <code>{masked_num}</code> 🔴\n"
+        f"@ <b>Prefix:</b> <tg-spoiler>{otp}</tg-spoiler>"
     )
+    
     
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # SENT CACHE  (dedup agar OTP tidak terkirim dua kali)
