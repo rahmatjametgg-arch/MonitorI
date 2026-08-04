@@ -438,40 +438,16 @@ def build_otp_message(
     region_code: str,
     masked_num:  str,
 ) -> str:
-    """
-    Contoh output di Telegram:
-
-    ╔══════════════════════╗
-    ║  💬  WHATSAPP        ║
-    ╚══════════════════════╝
-    🌍  Indonesia  ·  🇮🇩  ID
-    📱  +6281····7890
-
-    🔐  OTP CODE
-        <code>5 8 3 1 6 2</code>
-
-    ⏱  26 Jul 2026  ·  14:32:07
-    """
-    spaced = " ".join(list(otp))
-    ts     = datetime.now().strftime("%d %b %Y  ·  %H:%M:%S")
-    line   = "━" * 24
-
+    # Format ala Foto 2: Bendera + Icon Service + Nomor
+    # Contoh: 🇹🇬 #TG 💬 +228-SPDRMT-5032 🔴
+    # @ Prefix: <OTP>
+    
+    svc_tag = f"#{svc.get('code', 'OTP').upper()}"
     return (
-        f"╔{'═' * 24}╗\n"
-        f"  {svc['icon']}  <b>{svc['name'].upper()}</b>\n"
-        f"╚{'═' * 24}╝\n"
-        f"\n"
-        f"🌍  <b>{country.title()}</b>  ·  {flag}  <code>{region_code}</code>\n"
-        f"📱  <code>{masked_num}</code>\n"
-        f"\n"
-        f"{line}\n"
-        f"🔐  <b>OTP CODE</b>\n"
-        f"    <b><code>{spaced}</code></b>\n"
-        f"{line}\n"
-        f"\n"
-        f"<i>⏱  {ts}</i>"
+        f"{flag} <b>{svc_tag}</b> {svc.get('icon', '💬')} <code>{masked_num}</code> 🔴\n"
+        f"@ <b>Prefix:</b> <code>{otp}</code>"
     )
-
+    
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # SENT CACHE  (dedup agar OTP tidak terkirim dua kali)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -613,19 +589,18 @@ def tg_send_msg(chat_id: int, text: str):
     _tg_post(chat_id, text)
 
 def tg_send_otp(otp: str, msg_text: str):
-    """
-    Kirim pesan OTP ke SEMUA grup yang terdaftar di _forward_targets.
-    Setiap target dikirimi secara paralel.
-    """
+    # Ganti ALL_FILES_LINK dengan link channel/file kamu
+    ALL_FILES_LINK = "https://t.me/matchaappp" 
+
     kb = {
         "inline_keyboard": [
-            [{"text": f"📋  Copy OTP  —  {otp}", "copy_text": {"text": otp}}],
-            [
-                {"text": "🏆  Channel", "url": CHANNEL_LINK},
-                {"text": "📱  Number",  "url": NUMBER_LINK},
-            ],
+            # Baris 1: Tombol Copy OTP (Hijau/Utama)
+            [{"text": f"🔑 {otp}", "copy_text": {"text": otp}}],
+            # Baris 2: Cuma All Files (Tanpa Panel)
+            [{"text": "📁 All Files", "url": ALL_FILES_LINK}],
         ]
     }
+    
     targets = list_groups()
 
     def _send_one(cid):
@@ -636,7 +611,7 @@ def tg_send_otp(otp: str, msg_text: str):
     else:
         with ThreadPoolExecutor(max_workers=min(8, len(targets)), thread_name_prefix="tgsend") as pool:
             list(pool.map(_send_one, targets))
-
+            
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # COMMAND HANDLER  (/addbot /removebot /listbot)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
