@@ -438,11 +438,11 @@ def account_worker(acc):
     
     _log("LIVE-SMS", "Bot anteng mantau Live SMS...", Fore.CYAN)
     
-    while True:
+        while True:
         try:
             # Panggil GET biasa tanpa stream=True
             r = acc["session"].get(url, headers=headers, timeout=10)
-                                    if r.status_code == 200:
+            if r.status_code == 200:
                 soup = BeautifulSoup(r.text, "html.parser")
                 rows = soup.find_all("tr")
                 for row in rows:
@@ -453,14 +453,12 @@ def account_worker(acc):
                             _sent_cache.add(sid)
                             send_telegram(f"📩 **LIVE SMS REALTIME!**\n\n**SID:** `{sid}`\n**Pesan:** {msg}")
                             _log("LIVE-SMS", f"SMS Masuk & Forwarded! SID: {sid}", Fore.GREEN)
-                            
+
         except Exception as e:
             _log("SMS-ERR", f"Error: {e}", Fore.YELLOW)
-            
+
         time.sleep(3) # Jeda santai 3 detik
-        
             
-    
 # ----------------------------
 # RAILWAY HEALTHCHECK DUMMY SERVER
 # ----------------------------
