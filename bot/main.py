@@ -818,7 +818,7 @@ def poll_one(acc) -> bool:
             continue
         if not numbers:
             continue
-        n_workers = min(20, len(numbers))
+        n_workers = min(5, len(numbers))
         with ThreadPoolExecutor(max_workers=n_workers, thread_name_prefix="sms") as pool:
             futs = {pool.submit(process_number, rng, n, fallback_country, code): n for n in numbers}
             for fut in as_completed(futs):
@@ -834,16 +834,14 @@ def poll_one(acc) -> bool:
 # ACCOUNT WORKER  (polling loop per akun)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def account_worker(acc):
-    sleep_time = 1.0
+    sleep_time = 2.0
     while True:
         try:
-            found      = poll_one(acc)
-            sleep_time = 0.0 if found else min(sleep_time + 0.3, POLL_INTERVAL_MAX)
-        except Exception as e:
-            _log("WORKER", f"akun #{acc['idx']}: {e}", Fore.RED)
-            sleep_time = min(sleep_time * 2, 10.0)
-        if sleep_time > 0:
-            time.sleep(sleep_time)
+            found = poll_one(acc)
+            # Kalau dapet OTP, langsung tembak lagi tanpa jeda (0.0s)
+            # Kalau gak dapet, jeda perlahan naik (2s -> 2.5s -> 3s dst, max POLL_INTERVAL_MAX)
+            sleep_time = 0.0 if found else min(sleep_time + 0.5, POLL_INTERVAL_MAX)
+            
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # KEEPALIVE  (ping /portal agar session tidak expire)
