@@ -27,6 +27,7 @@ PROXIES = [
 ]
 
 def get_proxy():
+    return None
     if not PROXIES:
         return None
     p = random.choice(PROXIES)
