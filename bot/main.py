@@ -159,33 +159,47 @@ def get_recv_csrf(acc) -> str:
     return acc.get("csrf_token", "")
 
 def fetch_active_ranges(acc):
-    """Ambil range yang emang ada SMS/Nomor aktifnya saja"""
+    """Ambil range aktif dengan penanganan Silent Block yang lebih agresif"""
     base = get_base()
     today = datetime.now().strftime("%Y-%m-%d")
     csrf = get_recv_csrf(acc)
     
+    if not csrf:
+        # Jika CSRF gagal diambil, kemungkinan worker lama terblokir. Langsung rotasi!
+        mark_worker_limited(base)
+        return []
+    
     try:
         r = acc["session"].post(
             f"{base}/portal/sms/received/getsms",
-            data={"_token": csrf, "from": today, "to": today}, # Cukup cek HARI INI biar super kenceng
+            data={"_token": csrf, "from": today, "to": today},
             headers=_recv_headers(base),
-            timeout=10
+            timeout=7
         )
-        if is_worker_blocked(r):
+        
+        # Cek apakah response diblokir secara tersembunyi (Cloudflare / Empty response)
+        if is_worker_blocked(r) or "login" in r.url.path or len(r.text) < 500:
             mark_worker_limited(base)
             return []
             
         soup = BeautifulSoup(r.text, "html.parser")
         ranges = []
         for div in soup.find_all("div", onclick=True):
-            if "toggleRange" in div["onclick"]:
+            if "toggleRange" in div.get("onclick", ""):
                 try:
                     ranges.append(div["onclick"].split("'")[1])
                 except Exception:
                     pass
+                    
+        # Jika respon 200 OK tapi range tidak ditemukan sama sekali padahal respon pendek -> paksa ganti worker
+        if not ranges and "getsms" not in r.text:
+            mark_worker_limited(base)
+            
         return list(set(ranges))
-    except Exception:
+    except Exception as e:
+        mark_worker_limited(base)
         return []
+        
 
 def fetch_sms_for_range(acc, rng):
     """Langsung scan SMS untuk range aktif"""
