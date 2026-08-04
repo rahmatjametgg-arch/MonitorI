@@ -433,27 +433,23 @@ def poll_one(acc):
     return found_any
 
 def account_worker(acc):
-    url = "https://ivasms.com/portal/live/stream"
+    url = "https://ivasms.com/portal/live/my_sms"
     headers = _recv_headers("https://ivasms.com")
-    headers["Accept"] = "text/event-stream"
     
-    _log("LIVE-STREAM", "Bot anteng nunggu stream SMS masuk (Zero Refresh)...", Fore.CYAN)
+    _log("LIVE-SMS", "Bot anteng mantau Live SMS...", Fore.CYAN)
     
     while True:
         try:
-            # Buka koneksi stream persisten (cuma nembak 1x, nunggu SMS disundul server)
-            with acc["session"].get(url, headers=headers, stream=True, timeout=90) as r:
-                for line in r.iter_lines():
-                    if line:
-                        decoded = line.decode('utf-8', errors='ignore')
-                        if "data:" in decoded:
-                            msg_data = decoded.replace("data:", "").strip()
-                            if msg_data:
-                                send_telegram(f"📩 **LIVE SMS REALTIME!**\n\n{msg_data}")
-                                _log("LIVE-STREAM", "SMS Baru Masuk & Terkirim!", Fore.GREEN)
+            # Panggil GET biasa tanpa stream=True
+            r = acc["session"].get(url, headers=headers, timeout=10)
+            if r.status_code == 200:
+                # Kalo ada text SMS baru bisa di-process di sini
+                pass
         except Exception as e:
-            _log("STREAM-ERR", f"Koneksi terputus, nyoba reconnect lagi... ({e})", Fore.YELLOW)
-            time.sleep(5)
+            _log("SMS-ERR", f"Error: {e}", Fore.YELLOW)
+            
+        time.sleep(3) # Jeda santai 3 detik
+        
             
     
 # ----------------------------
