@@ -28,11 +28,6 @@ PROXIES = [
 
 def get_proxy():
     return None
-    if not PROXIES:
-        return None
-    p = random.choice(PROXIES)
-    return {"http": p, "https": p}
-    
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 init(autoreset=True)
