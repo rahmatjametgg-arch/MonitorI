@@ -240,9 +240,13 @@ def get_ranges(acc, _retry=0):
     csrf = get_recv_csrf(acc)
     try:
         r = acc["session"].post(
-            f"{base}/portal/sms/received/getsms",
-            data={"_token": csrf, "from": today, "to": today},
-            headers=_recv_headers(base),
+    f"{base}/portal/sms/received/getsms",
+    data={"_token": csrf, "from": today, "to": today},
+    headers=_recv_headers(base),
+    proxies=get_proxy(),
+    timeout=10
+        )
+        
         )
         if is_worker_blocked(r):
             mark_worker_limited(base)
@@ -269,9 +273,13 @@ def get_numbers(acc, rng):
     csrf = get_recv_csrf(acc)
     try:
         r = acc["session"].post(
-            f"{base}/portal/sms/received/getsms/number",
-            data={"_token": csrf, "start": today, "end": today, "range": rng},
-            headers=_recv_headers(base),
+    f"{base}/portal/sms/received/getsms/number",
+    data={"_token": csrf, "start": today, "end": today, "range": rng},
+    headers=_recv_headers(base),
+    proxies=get_proxy(),
+    timeout=10
+        )
+        
         )
         if is_worker_blocked(r):
             mark_worker_limited(base)
