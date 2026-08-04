@@ -393,53 +393,56 @@ def poll_one(acc):
         return False
 
     found_any = False
-    now = time.time()
-
     for rng in ranges:
-        # Cek daftar nomor di dalam range
         numbers = get_numbers(acc, rng)
         if not numbers:
             continue
+        
+        # Jeda antar range biar server IVAS napas
+        time.sleep(0.6)
 
         for num in numbers:
-            # Langsung sikat cek SMS
             sms_list = get_sms(acc, rng, num)
-            
             if sms_list:
                 for sms in sms_list:
                     sms_clean = sms.strip()
                     cache_key = f"{num}:{sms_clean}"
-                    
                     if cache_key not in _sent_cache:
                         _sent_cache.add(cache_key)
                         send_telegram(num, sms_clean)
                         found_any = True
-                        # Tandai nomor ini sebagai "HOT/ACTIVE" selama 5 menit
-                        _active_numbers_cache[num] = now + 300 
 
-            # Jeda tipis banget 0.2 detik antar nomor biar nggak bikin antrean panjang
-            time.sleep(0.2)
-            
+            # Jeda 0.5 detik per nomor (Angka paling aman dari Cloudflare)
+            time.sleep(0.5)
+
     return found_any
 
 def account_worker(acc):
+    consecutive_limits = 0
     while True:
         try:
+            # Jika worker kena rate-limit, tahan dulu dengan durasi naik bertahap
             if _all_workers_limited():
-                time.sleep(15)  # Kurangi masa pingsan kalo rate limit
+                consecutive_limits += 1
+                wait_time = min(10 * consecutive_limits, 60)
+                _log("WORKER", f"Rate-limited! Istirahat {wait_time} detik...", Fore.YELLOW)
+                time.sleep(wait_time)
                 continue
+            
+            # Reset counter kalau udah aman
+            consecutive_limits = 0
 
             found = poll_one(acc)
             
-            # Kalo nemu OTP langsung putar ulang TANPA JEDA (0.5s)
-            # Kalo sepi, jeda cuma 1.5 detik (dari yang tadinya 8-10 detik!)
-            sleep_time = 0.5 if found else 1.5
-            
+            # Kalo nemu SMS jeda 1 detik, kalo sepi jeda 2.5 detik
+            sleep_time = 1.0 if found else 2.5
+
         except Exception as e:
-            sleep_time = 3.0
+            sleep_time = 4.0
 
         time.sleep(sleep_time)
-                        
+        
+
         
 
 # ----------------------------
