@@ -278,8 +278,6 @@ def get_numbers(acc, rng):
     proxies=get_proxy(),
     timeout=10
         )
-        
-        )
         if is_worker_blocked(r):
             mark_worker_limited(base)
             return []
