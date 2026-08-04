@@ -403,22 +403,24 @@ _sent_cache = set()
 _active_numbers_cache = {}  # Priority tracker untuk nomor yang aktif
 
 def poll_one(acc):
-    ranges = get_ranges(acc)
+    found_any = False
+    
+    # Ambil range active dari acc
+    ranges = get_ranges(acc) 
     if not ranges:
+        _log("POLL", "Daftar Range KOSONG! Cek login/acc.", Fore.RED)
         return False
 
-    found_any = False
     for rng in ranges:
         numbers = get_numbers(acc, rng)
-        if not numbers:
-            continue
+        _log("POLL", f"Mengecek Range: {rng} | Total Nomor: {len(numbers)}", Fore.MAGENTA)
         
-        # Jeda antar range biar server IVAS napas
-        time.sleep(0.6)
-
         for num in numbers:
             sms_list = get_sms(acc, rng, num)
+            
+            # INTIP RESPON SMS:
             if sms_list:
+                _log("DEBUG-SMS", f"DAPET SMS di No {num}: {sms_list}", Fore.GREEN)
                 for sms in sms_list:
                     sms_clean = sms.strip()
                     cache_key = f"{num}:{sms_clean}"
@@ -426,11 +428,10 @@ def poll_one(acc):
                         _sent_cache.add(cache_key)
                         send_telegram(num, sms_clean)
                         found_any = True
+            
+            time.sleep(0.3) # Jeda aman per nomor
 
-            # Jeda 0.5 detik per nomor (Angka paling aman dari Cloudflare)
-            time.sleep(0.5)
-
-    return found_any
+    return found_any    
 
 def account_worker(acc):
     consecutive_limits = 0
