@@ -247,7 +247,6 @@ def get_ranges(acc, _retry=0):
     timeout=10
         )
         
-        )
         if is_worker_blocked(r):
             mark_worker_limited(base)
             if _all_workers_limited() or _retry >= len(WORKER_POOL) - 1:
