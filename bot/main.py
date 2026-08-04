@@ -437,16 +437,19 @@ def build_otp_message(
     country:     str,
     region_code: str,
     masked_num:  str,
+    prefix_text: str = "" # isi variabel prefix lu kalau ada
 ) -> str:
     svc_tag = svc.get('short', '#OTP')
     svc_icon = svc.get('icon', '💬')
     
-    # Gunakan tag <tg-spoiler> agar teks sensor berdebu
-    # Saat di-tap user, baru kebuka angkanya!
+    # Nilai yang disensor di Prefix (bisa isi nomor masked / prefix custom lu)
+    target_prefix = prefix_text if prefix_text else masked_num
+
     return (
         f"{flag} <b>{svc_tag}</b> {svc_icon} <code>{masked_num}</code> 🔴\n"
-        f"@ <b>Prefix:</b> <tg-spoiler>{otp}</tg-spoiler>"
+        f"<b>Prefix:</b> <tg-spoiler>{target_prefix}</tg-spoiler>"
     )
+    
     
     
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
