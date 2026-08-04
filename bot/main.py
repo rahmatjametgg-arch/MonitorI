@@ -93,10 +93,17 @@ _active_worker_idx    = 0
 _worker_limited_until = {}
 WORKER_LIMIT_COOLDOWN = 900   # 15 menit
 
-def get_base():
-    with _worker_lock:
-        return WORKER_POOL[_active_worker_idx % len(WORKER_POOL)]
+import random
 
+def get_base():
+    """Mengambil worker secara acak dari pool yang tidak sedang cooldown."""
+    now = time.time()
+    with _worker_lock:
+        available = [w for w in WORKER_POOL if _worker_limited_until.get(w, 0) < now]
+        if not available:
+            return min(WORKER_POOL, key=lambda w: _worker_limited_until.get(w, 0))
+        return random.choice(available)
+        
 def mark_worker_limited(url):
     global _active_worker_idx
     now = time.time()
