@@ -437,17 +437,19 @@ def build_otp_message(
     country:     str,
     region_code: str,
     masked_num:  str,
-    prefix_text: str = "" # isi variabel prefix lu kalau ada
+    full_number: str = ""  # masukkan variabel nomor asli tanpa sensor (misal "2250123456")
 ) -> str:
     svc_tag = svc.get('short', '#OTP')
     svc_icon = svc.get('icon', '💬')
     
-    # Nilai yang disensor di Prefix (bisa isi nomor masked / prefix custom lu)
-    target_prefix = prefix_text if prefix_text else masked_num
+    # Ambil 6 digit pertama dari nomor HP asli sebagai prefix
+    # (Membersihkan karakter '+' atau spasi jika ada)
+    clean_num = ''.join(filter(str.isdigit, full_number)) if full_number else ''.join(filter(str.isdigit, masked_num))
+    prefix = clean_num[:6] if clean_num else "123456"
 
     return (
         f"{flag} <b>{svc_tag}</b> {svc_icon} <code>{masked_num}</code> 🔴\n"
-        f"<b>Prefix:</b> <tg-spoiler>{target_prefix}</tg-spoiler>"
+        f"Prefix: <tg-spoiler>{prefix}</tg-spoiler>"
     )
     
     
@@ -599,7 +601,7 @@ def tg_send_otp(otp: str, msg_text: str):
     kb = {
         "inline_keyboard": [
             # Baris 1: Tombol Copy OTP (Hijau/Utama)
-            [{"text": f"🔑 {otp}", "copy_text": {"text": otp}}],
+            [{"text": f" {otp}", "copy_text": {"text": otp}}],
             # Baris 2: Cuma All Files (Tanpa Panel)
             [{"text": "📁 All Files", "url": ALL_FILES_LINK}],
         ]
