@@ -434,11 +434,13 @@ def poll_one(acc):
 
 def account_worker(acc):
     consecutive_limits = 0
+    _log("WORKER", "Loop polling dimulai...", Fore.GREEN)
+    
     while True:
         try:
             if _all_workers_limited():
                 consecutive_limits += 1
-                _log("WORKER", f"Semua worker rate-limit ({consecutive_limits}). Coba reset & retry...", Fore.YELLOW)
+                _log("WORKER", f"Semua worker rate-limit ({consecutive_limits}). Coba reset...", Fore.YELLOW)
                 time.sleep(15)
 
                 if hasattr(acc, 'workers'):
@@ -451,14 +453,18 @@ def account_worker(acc):
                         w['limit_until'] = 0
                 continue
 
+            _log("WORKER", "Sedang nge-poll nomor...", Fore.CYAN)
             found = poll_one(acc)
+            _log("WORKER", f"Selesai poll. Found: {found}", Fore.BLUE)
+            
             sleep_time = 1.5 if found else 3.0
 
         except Exception as e:
+            _log("WORKER-ERR", f"Error di loop: {e}", Fore.RED)
             sleep_time = 3.0
 
         time.sleep(sleep_time)
-              
+                      
 # ----------------------------
 # RAILWAY HEALTHCHECK DUMMY SERVER
 # ----------------------------
