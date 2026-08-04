@@ -435,12 +435,11 @@ def poll_one(acc):
 def account_worker(acc):
     url = "https://ivasms.com/portal/live/my_sms"
     headers = _recv_headers("https://ivasms.com")
-    
+
     _log("LIVE-SMS", "Bot anteng mantau Live SMS...", Fore.CYAN)
-    
-        while True:
+
+    while True:
         try:
-            # Panggil GET biasa tanpa stream=True
             r = acc["session"].get(url, headers=headers, timeout=10)
             if r.status_code == 200:
                 soup = BeautifulSoup(r.text, "html.parser")
@@ -457,7 +456,8 @@ def account_worker(acc):
         except Exception as e:
             _log("SMS-ERR", f"Error: {e}", Fore.YELLOW)
 
-        time.sleep(3) # Jeda santai 3 detik
+        time.sleep(3)
+        
             
 # ----------------------------
 # RAILWAY HEALTHCHECK DUMMY SERVER
