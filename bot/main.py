@@ -1,42 +1,28 @@
-"""
-SPIDERMAT OTP BOT — FAST & ANTI-RATE LIMIT
-Focus: Real-time OTP Forwarder without spamming endpoints
-"""
-
 import httpx
 from bs4 import BeautifulSoup
 import re
-from datetime import datetime
 import time
-import threading
 import json
 import os
 import sys
+import threading
 import requests
-import phonenumbers
-from phonenumbers import geocoder
 from colorama import init, Fore, Style
-from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ----------------------------
-# BASIC SETUP
-# ----------------------------
+# Direct stdout log tanpa buffer (Real-time)
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 init(autoreset=True)
 
-BOT_TOKEN     = os.getenv("BOT_TOKEN", "")
-IVAS_USERNAME = os.getenv("IVAS_USERNAME", "")
-IVAS_PASSWORD = os.getenv("IVAS_PASSWORD", "")
-DEFAULT_TARGET = -1003686221386
+# ================= KONFIGURASI =================
+# Isi Token Bot & ID Group Telegram Tujuan di sini (atau via Env Variables)
+BOT_TOKEN     = os.getenv("BOT_TOKEN", "8889061301:AAHeS_1vWRvEngCvCch9Hw7YhqGHh2QZp6I")
+TARGET_CHAT_ID = os.getenv("TARGET_CHAT_ID", "-1003937740976")  # ID Group / Channel tempat OTP dikirim
 
-CHANNEL_LINK  = "https://t.me/matchaappp"
-COOKIE_FILE   = "cookie.json"
-WORKER_LIMIT_COOLDOWN = 300  # Cooldown disingkat jadi 5 menit
+# File cookie / akun IVAS
+COOKIES_FILE  = "accounts.json"
 
-# ----------------------------
-# WORKER POOL & LOGGING
-# ----------------------------
+# List Worker Proxy IVAS
 WORKER_POOL = [
     "https://plain-butterfly-d9e9.kicenivas.workers.dev",
     "https://ivasmunchen.serverprivate1.web.id",
@@ -44,366 +30,122 @@ WORKER_POOL = [
     "https://ivasbykiven.alwayskixyzshop.web.id",
 ]
 
-_worker_lock          = threading.Lock()
-_active_worker_idx    = 0
-_worker_limited_until = {}
-
-def _log(tag, msg, color=Fore.CYAN):
-    ts = datetime.now().strftime("%H:%M:%S")
-    print(color + f"  {ts}  [{tag:<8}]  {msg}" + Style.RESET_ALL, flush=True)
-
-def get_base():
-    with _worker_lock:
-        return WORKER_POOL[_active_worker_idx % len(WORKER_POOL)]
-
-def mark_worker_limited(url):
-    global _active_worker_idx
-    now = time.time()
-    switched = False
-    with _worker_lock:
-        _worker_limited_until[url] = now + WORKER_LIMIT_COOLDOWN
-        for i in range(1, len(WORKER_POOL) + 1):
-            idx = (_active_worker_idx + i) % len(WORKER_POOL)
-            if _worker_limited_until.get(WORKER_POOL[idx], 0) < now:
-                _active_worker_idx = idx
-                switched = True
-                break
-    if switched:
-        _log("WORKER", f"Rate-limit! Pindah ke: {get_base()}", Fore.YELLOW)
-
-_RATE_LIMIT_MARKERS = (
-    "temporarily rate limited", "error 1027", "please check back later",
-    "has been rate limited", "error 1015", "you have been blocked",
-    "attention required", "error 1020", "checking your browser", "just a moment",
-)
-
-def is_worker_blocked(resp) -> bool:
-    if resp is None:
-        return False
+# ================= HELPER TELEGRAM =================
+def send_telegram_msg(text):
+    """Fungsi simpel khusus kirim OTP ke Group Telegram"""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TARGET_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    }
     try:
-        if resp.status_code in (429, 403, 503):
-            return True
-        sample = resp.text[:2000].lower()
-        return any(m in sample for m in _RATE_LIMIT_MARKERS)
-    except Exception:
-        return False
-
-# ----------------------------
-# SESSION & IVAS AUTH
-# ----------------------------
-def load_cookies():
-    if not os.path.exists(COOKIE_FILE):
-        return []
-    try:
-        with open(COOKIE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            if all(isinstance(x, dict) and "name" in x and "value" in x for x in data):
-                return [{x["name"]: x["value"] for x in data}]
-            return data
-        if isinstance(data, dict):
-            return [data]
+        r = requests.post(url, json=payload, timeout=10)
+        return r.status_code == 200
     except Exception as e:
-        _log("COOKIE", f"Error load cookie: {e}", Fore.RED)
+        print(Fore.RED + f"[TELEGRAM ERROR] Gagal kirim pesan: {e}")
+        return False
+
+# ================= LOGIC PARSING SMS / OTP =================
+def format_otp_message(sender, phone_number, sms_text):
+    """Format tampilan pesan OTP yang bakal dikirim ke Group Telegram"""
+    # Mencoba ekstrak 3-8 digit angka sebagai OTP
+    otp_code = "Tidak terdeteksi"
+    match = re.search(r'\b\d{3,8}\b', sms_text)
+    if match:
+        otp_code = match.group(0)
+
+    msg = (
+        f"📩 <b>OTP IVAS INCOMING</b>\n"
+        f"────────────────────\n"
+        f"📱 <b>Nomor:</b> <code>{phone_number}</code>\n"
+        f"👤 <b>Pengirim:</b> <code>{sender}</code>\n"
+        f"🔑 <b>Kode OTP:</b> <code>{otp_code}</code>\n"
+        f"────────────────────\n"
+        f"💬 <b>Pesan Lengkap:</b>\n<i>{sms_text}</i>"
+    )
+    return msg
+
+# ================= IVAS SMS MONITOR =================
+def fetch_latest_sms(session, base_url):
+    """Mengambil SMS masuk dari dashboard IVAS"""
+    recv_url = f"{base_url}/portal/sms/received"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": recv_url,
+    }
+    
+    try:
+        # Request data SMS terbaru dari IVAS
+        resp = session.get(f"{base_url}/portal/sms/received/getsms", headers=headers, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("data", [])
+    except Exception as e:
+        print(Fore.YELLOW + f"[IVAS ERROR] Fetch SMS gagal: {e}")
     return []
 
-def make_session(cookies: dict):
-    hdrs = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36",
-        "X-Requested-With": "XMLHttpRequest",
-        "Origin": "https://ivasms.com",
-        "Referer": "https://ivasms.com/",
-    }
-    s = httpx.Client(follow_redirects=True, timeout=15, headers=hdrs)
-    s.cookies.update(cookies)
-    return s
-
-def _recv_headers(base):
-    return {
-        "Accept": "text/html,*/*;q=0.01",
-        "X-Requested-With": "XMLHttpRequest",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Referer": f"{base}/portal/sms/received",
-        "Origin": "https://ivasms.com",
-    }
-
-# ----------------------------
-# IVAS FAST FETCHERS
-# ----------------------------
-_recv_csrf_cache = {}
-
-def get_recv_csrf(acc) -> str:
-    idx = acc["idx"]
-    now = time.time()
-    cached = _recv_csrf_cache.get(idx)
-    if cached and (now - cached["ts"]) < 600:
-        return cached["csrf"]
+def start_otp_forwarder():
+    """Main loop yang standby 24/7 nge-check & forward OTP"""
+    print(Fore.CYAN + Style.BRIGHT + "🚀 IVAS AUTO-FORWARD OTP BOT STARTED...")
     
-    base = get_base()
+    # Load akun / cookie
+    if not os.path.exists(COOKIES_FILE):
+        print(Fore.RED + f"❌ File {COOKIES_FILE} tidak ditemukan! Buat file tersebut dan masukkan cookie/session IVAS.")
+        return
+
     try:
-        r = acc["session"].get(f"{base}/portal/sms/received", timeout=10)
-        if is_worker_blocked(r):
-            mark_worker_limited(base)
-            return acc.get("csrf_token", "")
-            
-        soup = BeautifulSoup(r.text, "html.parser")
-        meta = soup.find("meta", {"name": "csrf-token"})
-        csrf = meta.get("content", "") if meta else ""
-        
-        if csrf:
-            acc["csrf_token"] = csrf
-            _recv_csrf_cache[idx] = {"csrf": csrf, "ts": now}
-            return csrf
-    except Exception:
-        pass
-    return acc.get("csrf_token", "")
+        with open(COOKIES_FILE, "r") as f:
+            accounts = json.load(f)
+    except Exception as e:
+        print(Fore.RED + f"❌ Gagal membaca {COOKIES_FILE}: {e}")
+        return
 
-def fetch_active_ranges(acc):
-    """Ambil range aktif dengan penanganan Silent Block yang lebih agresif"""
-    base = get_base()
-    today = datetime.now().strftime("%Y-%m-%d")
-    csrf = get_recv_csrf(acc)
-    
-    if not csrf:
-        # Jika CSRF gagal diambil, kemungkinan worker lama terblokir. Langsung rotasi!
-        mark_worker_limited(base)
-        return []
-    
-    try:
-        r = acc["session"].post(
-            f"{base}/portal/sms/received/getsms",
-            data={"_token": csrf, "from": today, "to": today},
-            headers=_recv_headers(base),
-            timeout=7
-        )
+    if not accounts:
+        print(Fore.RED + "❌ Tidak ada akun/cookie di dalam file.")
+        return
+
+    # Cache untuk mencatat SMS ID yang sudah pernah dikirim biar ga spam/duplikat
+    seen_sms_ids = set()
+    worker_idx = 0
+
+    while True:
+        current_worker = WORKER_POOL[worker_idx % len(WORKER_POOL)]
         
-        # Cek apakah response diblokir secara tersembunyi (Cloudflare / Empty response)
-        if is_worker_blocked(r) or "login" in r.url.path or len(r.text) < 500:
-            mark_worker_limited(base)
-            return []
+        for acc in accounts:
+            # Menggunakan session requests dari cookie akun
+            session = requests.Session()
+            if "cookies" in acc:
+                session.cookies.update(acc["cookies"])
+                
+            sms_list = fetch_latest_sms(session, current_worker)
             
-        soup = BeautifulSoup(r.text, "html.parser")
-        ranges = []
-        for div in soup.find_all("div", onclick=True):
-            if "toggleRange" in div.get("onclick", ""):
-                try:
-                    ranges.append(div["onclick"].split("'")[1])
-                except Exception:
-                    pass
+            for sms in sms_list:
+                # Mengambil unique ID dari SMS (atau gabungan timestamp + nomor)
+                sms_id = sms.get("id") or f"{sms.get('number')}_{sms.get('created_at')}"
+                
+                if sms_id not in seen_sms_ids:
+                    seen_sms_ids.add(sms_id)
                     
-        # Jika respon 200 OK tapi range tidak ditemukan sama sekali padahal respon pendek -> paksa ganti worker
-        if not ranges and "getsms" not in r.text:
-            mark_worker_limited(base)
-            
-        return list(set(ranges))
-    except Exception as e:
-        mark_worker_limited(base)
-        return []
+                    phone = sms.get("number", "Unknown")
+                    sender = sms.get("sender", "System")
+                    text = sms.get("sms", "")
+                    
+                    print(Fore.GREEN + f"✅ SMS Baru Ditemukan dari {phone}! Memproses forward...")
+                    
+                    # Format dan kirim langsung ke Telegram
+                    formatted_msg = format_otp_message(sender, phone, text)
+                    send_telegram_msg(formatted_msg)
         
+        # Batasi memori cache ID SMS agar tidak membengkak
+        if len(seen_sms_ids) > 5000:
+            seen_sms_ids.clear()
 
-def fetch_sms_for_range(acc, rng):
-    """Langsung scan SMS untuk range aktif"""
-    base = get_base()
-    today = datetime.now().strftime("%Y-%m-%d")
-    csrf = get_recv_csrf(acc)
-    
-    # Ambil nomor di range ini
-    try:
-        r = acc["session"].post(
-            f"{base}/portal/sms/received/getsms/number",
-            data={"_token": csrf, "start": today, "end": today, "range": rng},
-            headers=_recv_headers(base),
-            timeout=10
-        )
-        if is_worker_blocked(r):
-            mark_worker_limited(base)
-            return []
-
-        soup = BeautifulSoup(r.text, "html.parser")
-        numbers = []
-        for div in soup.find_all("div", onclick=True):
-            try:
-                val = div["onclick"].split("'")[1]
-                if val and val != rng:
-                    numbers.append(val)
-            except Exception:
-                pass
-
-        results = []
-        # Tarik SMS hanya dari nomor yang ada di range aktif
-        for num in numbers:
-            r_sms = acc["session"].post(
-                f"{base}/portal/sms/received/getsms/number/sms",
-                data={"_token": csrf, "start": today, "end": today, "Number": num, "Range": rng},
-                headers=_recv_headers(base),
-                timeout=10
-            )
-            if is_worker_blocked(r_sms):
-                mark_worker_limited(base)
-                continue
-
-            soup_sms = BeautifulSoup(r_sms.text, "html.parser")
-            for t in soup_sms.stripped_strings:
-                t = t.strip().replace("<#>", "").strip()
-                if re.fullmatch(r"[A-Za-z0-9]{10,}", t) or "No SMS Found" in t:
-                    continue
-                if t and not any(x in t.lower() for x in ["sender", "revenue", "time"]):
-                    results.append((num, t))
-            
-            time.sleep(0.15) # Jeda mikro anti-limit per nomor
-
-        return results
-    except Exception:
-        return []
-
-# ----------------------------
-# TELEGRAM FORWARDER
-# ----------------------------
-def _get_flag(phone_str):
-    cleaned = re.sub(r"\D", "", phone_str)
-    if not cleaned:
-        return "🌐", "1"
-    try:
-        parsed = phonenumbers.parse("+" + cleaned, None)
-        region = geocoder.region_code_for_number(parsed)
-        cc = str(parsed.country_code)
-        if region and len(region) == 2:
-            flag = chr(ord(region[0]) + 127397) + chr(ord(region[1]) + 127397)
-            return flag, cc
-    except Exception:
-        pass
-    return "🌐", cleaned[:3]
-
-def mask_phone(phone_str):
-    cleaned = re.sub(r"\D", "", phone_str)
-    if len(cleaned) <= 7:
-        return cleaned
-    return f"+{cleaned[:4]}🗿{cleaned[-4:]}"
-
-def send_telegram(phone, sms_text):
-    if not BOT_TOKEN:
-        return
-
-    sms_clean = sms_text.strip()
-    m = re.search(r"\b\d{3}[-\s]?\d{3}\b", sms_clean)
-    otp = m.group(0) if m else None
-
-    if not otp:
-        candidates = re.findall(r"\b\d{4,8}\b", sms_clean)
-        for c in candidates:
-            if c != "0120":
-                otp = c
-                break
-
-    if not otp or otp == "0120":
-        return
-
-    flag, _ = _get_flag(phone)
-    masked_num = mask_phone(phone)
-
-    caption = f"{flag} WS {masked_num} #ID"
-    keyboard = {
-        "inline_keyboard": [
-            [{"text": f"📋 {otp}", "copy_text": {"text": otp}}],
-            [{"text": "All File ↗", "url": CHANNEL_LINK}]
-        ]
-    }
-
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id": DEFAULT_TARGET,
-                "text": caption,
-                "parse_mode": "HTML",
-                "reply_markup": json.dumps(keyboard),
-            },
-            timeout=10,
-        )
-        _log("OTP", f"⚡ OTP KETEMU! {masked_num} -> {otp}", Fore.GREEN)
-    except Exception as e:
-        _log("TG-ERR", f"Gagal forward ke TG: {e}", Fore.RED)
-
-# ----------------------------
-# POLLING ENGINE (SMART FAST-LANE)
-# ----------------------------
-_sent_cache = set()
-
-def account_worker(acc):
-    _log("WORKER", "⚡ FAST-LANE Engine Aktif! Siap narik OTP...", Fore.GREEN)
-    
-    while True:
-        try:
-            # 1. Tarik HANYA range yang ada traffic SMS hari ini
-            active_ranges = fetch_active_ranges(acc)
-            
-            if not active_ranges:
-                _log("POLL", "Belum ada SMS baru masuk hari ini. Menunggu...", Fore.CYAN)
-                time.sleep(2.5)  # Jeda aman kalau lagi sepi
-                continue
-
-            found_new = False
-            for rng in active_ranges:
-                sms_items = fetch_sms_for_range(acc, rng)
-                for num, sms in sms_items:
-                    cache_key = f"{num}:{sms.strip()}"
-                    if cache_key not in _sent_cache:
-                        _sent_cache.add(cache_key)
-                        send_telegram(num, sms)
-                        found_new = True
-
-            # Jika dapet OTP baru, langsung hajar poll lagi tanpa delay.
-            # Kalau sepi, kasih delay 1.5 - 2 detik biar bebas dari 429.
-            sleep_time = 0.5 if found_new else 2.0
-            time.sleep(sleep_time)
-
-        except Exception as e:
-            _log("WORKER-ERR", f"Error loop: {e}", Fore.RED)
-            time.sleep(3.0)
-
-# ----------------------------
-# RAILWAY HEALTHCHECK DUMMY SERVER
-# ----------------------------
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-    def log_message(self, format, *args):
-        pass
-
-def run_health_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    server.serve_forever()
-
-# ----------------------------
-# MAIN ENTRY
-# ----------------------------
-def main():
-    _log("SYSTEM", "Memulai Bot...", Fore.GREEN)
-    threading.Thread(target=run_health_server, daemon=True).start()
-
-    cookies_list = load_cookies()
-    if not cookies_list:
-        cookies_list = [{}]
-
-    accounts = []
-    for idx, c in enumerate(cookies_list, 1):
-        s = make_session(c)
-        acc = {"idx": idx, "session": s, "csrf_token": ""}
-        accounts.append(acc)
-
-    for acc in accounts:
-        threading.Thread(target=account_worker, args=(acc,), daemon=True).start()
-
-    _log("SYSTEM", f"{len(accounts)} Worker Berhasil Dijalankan!", Fore.GREEN)
-
-    while True:
-        time.sleep(1)
+        # Cooldown check interval (misal setiap 3-5 detik)
+        time.sleep(4)
 
 if __name__ == "__main__":
-    main()
-    
+    start_otp_forwarder()
+            
