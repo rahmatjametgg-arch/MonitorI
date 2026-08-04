@@ -17,7 +17,21 @@ import phonenumbers
 from phonenumbers import geocoder
 from colorama import init, Fore, Style
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import random
 
+# ==========================================
+# LANGKAH 1: KONFIGURASI PROXY SAUDI ARABIA
+# ==========================================
+PROXIES = [
+    "http://mob-sa:pgw-631c2bb4e0cc4ee1f1368b16ed7770ff28872b8f9fb92b69@gw.proxyrise.com:443"
+]
+
+def get_proxy():
+    if not PROXIES:
+        return None
+    p = random.choice(PROXIES)
+    return {"http": p, "https": p}
+    
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
 init(autoreset=True)
