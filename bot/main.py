@@ -297,11 +297,15 @@ def get_ranges_cached(acc):
             return cached
     return get_ranges(acc)
 
-def get_numbers(acc, rng, _retry=0):
-    base          = get_base()
-    today         = datetime.now().strftime("%Y-%m-%d")
-    csrf          = get_recv_csrf(acc)
-    worker_before = base
+def get_numbers(acc: dict, rng: str, _retry: int = 0) -> list:
+    """Ambil daftar nomor telepon aktif dari range tertentu."""
+    base = get_base()
+    try:
+        csrf = get_csrf(acc, base)
+        if not csrf:
+            return []
+            
+        worker_before = base
         r = acc["session"].post(
             f"{base}/portal/sms/received/getsms/number",
             data={"_token": csrf, "start": "today", "end": "today", "range": rng},
@@ -310,8 +314,10 @@ def get_numbers(acc, rng, _retry=0):
         if is_worker_blocked(r) and _retry < len(WORKER_POOL) - 1:
             mark_worker_limited(worker_before)
             return get_numbers(acc, rng, _retry + 1)
+            
         if r.status_code == 429 or "/login" in str(r.url):
             return []
+            
         soup = BeautifulSoup(r.text, "html.parser")
         numbers = []
         for div in soup.find_all("div", onclick=True):
@@ -354,6 +360,7 @@ def get_sms(acc: dict, rng: str, number: str) -> list:
         _log("SMS-ERR", f"error get_sms {number}: {e}", Fore.RED)
         
     return []
+    
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PLATFORM DETECTION  (emoji + nama lengkap)
