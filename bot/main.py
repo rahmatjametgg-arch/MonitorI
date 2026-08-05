@@ -301,7 +301,7 @@ def get_numbers(acc, rng, _retry=0):
     base          = get_base()
     today         = datetime.now().strftime("%Y-%m-%d")
     csrf          = get_recv_csrf(acc)
-            worker_before = base
+    worker_before = base
         r = acc["session"].post(
             f"{base}/portal/sms/received/getsms/number",
             data={"_token": csrf, "start": "today", "end": "today", "range": rng},
@@ -355,8 +355,6 @@ def get_sms(acc: dict, rng: str, number: str) -> list:
         
     return []
 
-            
-    
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PLATFORM DETECTION  (emoji + nama lengkap)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
