@@ -1,27 +1,23 @@
 """
-SPIDERMAT OTP BOT — FORWARD MODE
-Baca cookie dari cookie.json → poll IVAS → forward OTP ke Telegram.
-Command: /addbot /removebot /listbot
+SPIDERMAT OTP BOT — ASYNC ULTRA-FAST FORWARD MODE
 """
 
-import httpx
-from bs4 import BeautifulSoup
-import re
-from datetime import datetime
-import time
-import threading
+import asyncio
+import hashlib
 import json
 import os
-import hashlib
+import random
+import re
 import signal
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import time
+from datetime import datetime
 
-import requests
+import httpx
 import phonenumbers
+from bs4 import BeautifulSoup
+from colorama import Fore, Style, init
 from phonenumbers import geocoder
-from colorama import init, Fore, Style
 
 sys.stdout.reconfigure(line_buffering=True)
 sys.stderr.reconfigure(line_buffering=True)
@@ -30,56 +26,39 @@ init(autoreset=True)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CONFIG
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-BOT_TOKEN    = os.getenv("BOT_TOKEN", "")   # wajib diset via env var
-OWNER_ID     = int(os.getenv("OWNER_ID", "0"))
+BOT_TOKEN      = os.getenv("BOT_TOKEN", "")
+OWNER_ID       = int(os.getenv("OWNER_ID", "0"))
 
-# Grup default yang SELALU menerima OTP (tetap ada meskipun tidak /addbot)
 DEFAULT_TARGET = -1003686221386
+CHANNEL_LINK   = "https://t.me/matttttcha"
+ALL_FILES_LINK = "https://t.me/matchaappp"
 
-CHANNEL_LINK = "https://t.me/matttttcha"
-NUMBER_LINK  = "https://t.me/matttttcha"
-
-COOKIE_FILE        = "cookie.json"
-CACHE_FILE         = "file/sent_cache.json"
-GROUPS_FILE        = "file/groups.json"     # daftar grup tambahan via /addbot
-MAX_CACHE          = 2000
-POLL_INTERVAL_MAX  = 15.0    # detik — jeda maks saat tidak ada OTP baru
-KEEPALIVE_INTERVAL = 480    # detik — ping /portal tiap 8 menit
+COOKIE_FILE    = "cookie.json"
+CACHE_FILE     = "file/sent_cache.json"
+GROUPS_FILE    = "file/groups.json"
+MAX_CACHE      = 2000
+POLL_INTERVAL  = 2.0
+KEEPALIVE_INT  = 480
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # LOGGING
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 _LOG_ICONS = {
-    "OTP":      "🟢",
-    "COOKIE":   "🍪",
-    "CONFIG":   "⚙️ ",
-    "WORKER":   "🔄",
-    "RANGE":    "📡",
-    "CSRF":     "🔑",
-    "KA-OK":    "💚",
-    "KA-WARN":  "🟡",
-    "KA-ERR":   "🔴",
-    "KEEPALIVE":"🫀",
-    "SERVER":   "🌐",
-    "CACHE":    "💾",
-    "TG-ERR":   "❌",
-    "NUM":      "📟",
-    "SMS":      "📨",
-    "THREAD+":  "🧵",
-    "SHUTDOWN": "🛑",
-    "FATAL":    "💀",
-    "CMD":      "⌨️ ",
-    "GROUP":    "👥",
+    "OTP": "🟢", "COOKIE": "🍪", "CONFIG": "⚙️ ", "WORKER": "🔄",
+    "RANGE": "📡", "CSRF": "🔑", "KA-OK": "💚", "KA-WARN": "🟡",
+    "KA-ERR": "🔴", "KEEPALIVE": "🫀", "SERVER": "🌐", "CACHE": "💾",
+    "TG-ERR": "❌", "NUM": "📟", "SMS": "📨", "TASK+": "⚡",
+    "SHUTDOWN": "🛑", "FATAL": "💀", "CMD": "⌨️ ", "GROUP": "👥",
 }
 
 def _log(tag, msg, color=Fore.CYAN):
-    icon  = _LOG_ICONS.get(tag, "•")
-    ts    = datetime.now().strftime("%H:%M:%S")
+    icon = _LOG_ICONS.get(tag, "•")
+    ts = datetime.now().strftime("%H:%M:%S")
     label = f"{icon} {tag:<9}"
     print(color + f"  {ts}  {label}  {msg}" + Style.RESET_ALL, flush=True)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# WORKER POOL  (proxy fallback jika kena rate-limit)
+# WORKER POOL MANAGER
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 WORKER_POOL = [
     "https://plain-butterfly-d9e9.kicenivas.workers.dev",
@@ -88,73 +67,38 @@ WORKER_POOL = [
     "https://ivasbykiven.alwayskixyzshop.web.id",
 ]
 
-_worker_lock          = threading.Lock()
-_active_worker_idx    = 0
 _worker_limited_until = {}
-WORKER_LIMIT_COOLDOWN = 300   # Cukup 2 menit aja!
+WORKER_LIMIT_COOLDOWN = 180
 
-
-import random
-
-def get_base():
-    """Mengambil worker secara acak dari pool yang tidak sedang cooldown."""
+def get_base() -> str:
     now = time.time()
-    with _worker_lock:
-        available = [w for w in WORKER_POOL if _worker_limited_until.get(w, 0) < now]
-        if not available:
-            return min(WORKER_POOL, key=lambda w: _worker_limited_until.get(w, 0))
-        return random.choice(available)
-        
-def mark_worker_limited(url):
-    global _active_worker_idx
-    now = time.time()
-    with _worker_lock:
-        _worker_limited_until[url] = now + WORKER_LIMIT_COOLDOWN
-        for i in range(1, len(WORKER_POOL) + 1):
-            idx = (_active_worker_idx + i) % len(WORKER_POOL)
-            if _worker_limited_until.get(WORKER_POOL[idx], 0) < now:
-                _active_worker_idx = idx
-                break
-    _log("WORKER", f"rate-limited → pindah ke {get_base()}", Fore.YELLOW)
-    time.sleep(0.5)  # jeda kecil agar log/request tidak beruntun
+    available = [w for w in WORKER_POOL if _worker_limited_until.get(w, 0) < now]
+    if not available:
+        return min(WORKER_POOL, key=lambda w: _worker_limited_until.get(w, 0))
+    return random.choice(available)
 
+def mark_worker_limited(url: str):
+    _worker_limited_until[url] = time.time() + WORKER_LIMIT_COOLDOWN
+    _log("WORKER", f"rate-limited → cooling down {url}", Fore.YELLOW)
 
-def all_workers_limited():
-    """True jika semua worker sedang dalam cooldown."""
-    now = time.time()
-    with _worker_lock:
-        return bool(WORKER_POOL) and all(
-            _worker_limited_until.get(w, 0) > now for w in WORKER_POOL
-        )
-    
 _RATE_LIMIT_MARKERS = (
     "temporarily rate limited", "error 1027", "please check back later",
     "has been rate limited", "error 1015", "you have been blocked",
     "attention required", "error 1020", "checking your browser", "just a moment",
 )
 
-def is_worker_blocked(resp) -> bool:
+def is_worker_blocked(resp: httpx.Response) -> bool:
     if resp is None:
         return False
-    try:
-        if resp.status_code == 429:
-            return True
-        sample = resp.text[:2000].lower()
-        return any(m in sample for m in _RATE_LIMIT_MARKERS)
-    except:
-        return False
+    if resp.status_code == 429:
+        return True
+    sample = resp.text[:2000].lower()
+    return any(m in sample for m in _RATE_LIMIT_MARKERS)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# COOKIE LOADING
+# COOKIE & SESSION MANAGEMENT
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def load_cookies():
-    """
-    Format yang didukung:
-      1. [{"name":"k","value":"v"}, ...]          — array browser export
-      2. {"email": {"laravel_session": "x"}, ...} — multi-akun per email
-      3. {"laravel_session": "x", ...}            — flat single akun
-    Return: list of cookie-dict (satu dict per akun).
-    """
+def load_cookies() -> list:
     if not os.path.exists(COOKIE_FILE):
         _log("COOKIE", f"{COOKIE_FILE} tidak ditemukan!", Fore.RED)
         return []
@@ -175,184 +119,176 @@ def load_cookies():
         _log("COOKIE", f"error load {COOKIE_FILE}: {e}", Fore.RED)
     return []
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# HTTPX SESSION
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def make_session(cookies: dict, timeout=30):
+def create_async_client(cookies: dict) -> httpx.AsyncClient:
     hdrs = {
-        "User-Agent":       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "X-Requested-With": "XMLHttpRequest",
-        "Origin":           "https://ivasms.com",
-        "Referer":          "https://ivasms.com/",
+        "Origin": "https://ivasms.com",
+        "Referer": "https://ivasms.com/",
     }
-    s = httpx.Client(
-        follow_redirects=True,
-        timeout=timeout,
+    return httpx.AsyncClient(
+        cookies=cookies,
         headers=hdrs,
-        limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+        follow_redirects=True,
+        timeout=15.0,
+        limits=httpx.Limits(max_connections=100, max_keepalive_connections=40)
     )
-    s.cookies.update(cookies)
-    return s
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# CSRF CACHE  (per-akun, TTL 15 menit)
+# SENT CACHE & GROUPS (ASYNC SAFE)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+sent_cache = set()
+_cache_dirty = False
+_forward_targets = {DEFAULT_TARGET}
+
+def load_sent_cache():
+    global sent_cache
+    os.makedirs("file", exist_ok=True)
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                sent_cache = set(data) if isinstance(data, list) else set()
+        except Exception:
+            sent_cache = set()
+
+def save_sent_cache():
+    global _cache_dirty
+    if not _cache_dirty:
+        return
+    try:
+        os.makedirs("file", exist_ok=True)
+        lst = list(sent_cache)[-MAX_CACHE:]
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(lst, f)
+        _cache_dirty = False
+    except Exception as e:
+        _log("CACHE", f"save error: {e}", Fore.YELLOW)
+
+def load_groups():
+    if os.path.exists(GROUPS_FILE):
+        try:
+            with open(GROUPS_FILE, "r", encoding="utf-8") as f:
+                ids = json.load(f)
+            if isinstance(ids, list):
+                for gid in ids:
+                    _forward_targets.add(int(gid))
+            _log("GROUP", f"{len(ids)} grup dimuat dari {GROUPS_FILE}", Fore.CYAN)
+        except Exception as e:
+            _log("GROUP", f"load error: {e}", Fore.YELLOW)
+
+def save_groups():
+    try:
+        os.makedirs("file", exist_ok=True)
+        with open(GROUPS_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(_forward_targets), f)
+    except Exception as e:
+        _log("GROUP", f"save error: {e}", Fore.YELLOW)
+        
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# IVAS API (ASYNC)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 _recv_csrf_cache = {}
-RECV_CSRF_TTL    = 900
+RECV_CSRF_TTL = 900
 
-def get_recv_csrf(acc, _retry=0) -> str:
-    idx    = acc["idx"]
-    now    = time.time()
+def _recv_headers(base):
+    return {
+        "Accept": "text/html,*/*;q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Referer": f"{base}/portal/sms/received",
+        "Origin": "https://ivasms.com",
+    }
+
+async def get_recv_csrf(acc: dict, client: httpx.AsyncClient, retry=0) -> str:
+    idx = acc["idx"]
+    now = time.time()
     cached = _recv_csrf_cache.get(idx)
     if cached and (now - cached["ts"]) < RECV_CSRF_TTL:
         return cached["csrf"]
-    base     = get_base()
-    recv_url = f"{base}/portal/sms/received"
+        
+    base = get_base()
     try:
-        worker_before = base
-        r = acc["session"].get(recv_url, timeout=15)
-        if is_worker_blocked(r) and _retry < len(WORKER_POOL) - 1:
-            mark_worker_limited(worker_before)
-            return get_recv_csrf(acc, _retry + 1)
-        if "/login" in str(r.url):
-            return acc.get("csrf_token", "")
+        r = await client.get(f"{base}/portal/sms/received")
+        if is_worker_blocked(r) and retry < len(WORKER_POOL) - 1:
+            mark_worker_limited(base)
+            return await get_recv_csrf(acc, client, retry + 1)
+            
         soup = BeautifulSoup(r.text, "html.parser")
-        csrf = ""
         meta = soup.find("meta", {"name": "csrf-token"})
-        if meta:
-            csrf = meta.get("content", "")
-        if not csrf:
-            inp = soup.find("input", {"name": "_token"})
-            if inp:
-                csrf = inp.get("value", "")
-        if not csrf:
-            m = re.search(r"['\"]_token['\"]\s*[,:]?\s*['\"]([A-Za-z0-9_\-+/=]{20,})['\"]", r.text)
-            if m:
-                csrf = m.group(1)
+        csrf = meta.get("content", "") if meta else ""
         if csrf:
-            acc["csrf_token"] = csrf
             _recv_csrf_cache[idx] = {"csrf": csrf, "ts": now}
             return csrf
     except Exception as e:
         _log("CSRF", f"akun #{idx}: {e}", Fore.YELLOW)
-    return acc.get("csrf_token", "")
+    return ""
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# IVAS API  (ranges / numbers / sms)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_ranges_cache     = {}   # idx -> (ts, list)
-_ranges_429_until = {}   # idx -> ts
-RANGES_CACHE_TTL  = 300  # 5 menit
-
-def _recv_headers(base):
-    return {
-        "Accept":           "text/html,*/*;q=0.01",
-        "X-Requested-With": "XMLHttpRequest",
-        "Content-Type":     "application/x-www-form-urlencoded; charset=UTF-8",
-        "Referer":          f"{base}/portal/sms/received",
-        "Origin":           "https://ivasms.com",
-    }
-
-def get_ranges(acc, _retry=0):
-    idx = acc["idx"]
-    now = time.time()
-    if now < _ranges_429_until.get(idx, 0):
-        entry = _ranges_cache.get(idx)
-        return entry[1] if entry else []
-    base          = get_base()
-    today         = datetime.now().strftime("%Y-%m-%d")
-    csrf          = get_recv_csrf(acc)
-    worker_before = base
-    r = acc["session"].post(
-        f"{base}/portal/sms/received/getsms",
-        data={"_token": csrf, "from": today, "to": today},
-        headers=_recv_headers(base),
-    )
-    if is_worker_blocked(r) and _retry < len(WORKER_POOL) - 1:
-        mark_worker_limited(worker_before)
-        return get_ranges(acc, _retry + 1)
-    if r.status_code == 429:
-        _ranges_429_until[idx] = now + 180
-        entry = _ranges_cache.get(idx)
-        _log("RANGE", f"akun #{idx} — 429, cooldown 3 menit, pakai cache lama", Fore.YELLOW)
-        return entry[1] if entry else []
-    if "/login" in str(r.url):
-        return []
-    soup   = BeautifulSoup(r.text, "html.parser")
-    ranges = []
-    for div in soup.find_all("div", onclick=True):
-        if "toggleRange" in div["onclick"]:
-            try:
-                ranges.append(div["onclick"].split("'")[1])
-            except:
-                pass
-    result = list(set(ranges))
-    _ranges_429_until.pop(idx, None)
-    if result:
-        _ranges_cache[idx] = (now, result)
-    return result
-
-def get_ranges_cached(acc):
-    idx  = acc["idx"]
-    now  = time.time()
-    if now < _ranges_429_until.get(idx, 0):
-        entry = _ranges_cache.get(idx)
-        return entry[1] if entry else []
-    entry = _ranges_cache.get(idx)
-    if entry:
-        ts, cached = entry
-        if now - ts < RANGES_CACHE_TTL:
-            return cached
-    return get_ranges(acc)
-
-def get_numbers(acc: dict, rng: str, _retry: int = 0) -> list:
-    """Ambil daftar nomor telepon aktif dari range tertentu."""
+async def get_ranges(acc: dict, client: httpx.AsyncClient, retry=0) -> list:
     base = get_base()
-    try:
-        worker_before = base
-        r = acc["session"].post(
-            f"{base}/portal/sms/received/getsms/number",
-            data={"start": "today", "end": "today", "range": rng},
-            headers=_recv_headers(base),
-            timeout=10
-        )
-        if is_worker_blocked(r) and _retry < len(WORKER_POOL) - 1:
-            mark_worker_limited(worker_before)
-            return get_numbers(acc, rng, _retry + 1)
-            
-        if r.status_code == 429 or "/login" in str(r.url):
-            return []
-            
-        soup = BeautifulSoup(r.text, "html.parser")
-        numbers = []
-        for div in soup.find_all("div", onclick=True):
-            try:
-                val = div["onclick"].split("'")[1]
-                if val and val != rng:
-                    numbers.append(val)
-            except Exception:
-                pass
-        return list(set(numbers))
-    except Exception as e:
-        _log("NUM-ERR", f"error get_numbers {rng}: {e}", Fore.RED)
-        return []
-
-
-def get_sms(acc: dict, rng: str, number: str) -> list:
-    """Ambil daftar SMS dari portal untuk nomor tertentu (hanya 2 SMS terbaru)."""
-    base = get_base()
-    url = f"{base}/portal/sms/received/getsms/number"
-    payload = {
-        "range": rng,
-        "number": number
-    }
+    today = datetime.now().strftime("%Y-%m-%d")
+    csrf = await get_recv_csrf(acc, client)
     
     try:
-        session = acc.get("session", requests)
-        r = session.post(url, data=payload, timeout=10)
-        
-        if r.status_code == 429:
+        r = await client.post(
+            f"{base}/portal/sms/received/getsms",
+            data={"_token": csrf, "from": today, "to": today},
+            headers=_recv_headers(base)
+        )
+        if is_worker_blocked(r) and retry < len(WORKER_POOL) - 1:
+            mark_worker_limited(base)
+            return await get_ranges(acc, client, retry + 1)
+            
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+            ranges = []
+            for div in soup.find_all("div", onclick=True):
+                if "toggleRange" in div.get("onclick", ""):
+                    try:
+                        ranges.append(div["onclick"].split("'")[1])
+                    except Exception:
+                        pass
+            return list(set(ranges))
+    except Exception as e:
+        _log("RANGE", f"akun #{acc['idx']}: {e}", Fore.YELLOW)
+    return []
+
+async def get_numbers(client: httpx.AsyncClient, rng: str, retry=0) -> list:
+    base = get_base()
+    try:
+        r = await client.post(
+            f"{base}/portal/sms/received/getsms/number",
+            data={"start": "today", "end": "today", "range": rng},
+            headers=_recv_headers(base)
+        )
+        if is_worker_blocked(r) and retry < len(WORKER_POOL) - 1:
+            mark_worker_limited(base)
+            return await get_numbers(client, rng, retry + 1)
+            
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+            numbers = []
+            for div in soup.find_all("div", onclick=True):
+                try:
+                    val = div["onclick"].split("'")[1]
+                    if val and val != rng:
+                        numbers.append(val)
+                except Exception:
+                    pass
+            return list(set(numbers))
+    except Exception as e:
+        _log("NUM-ERR", f"error get_numbers {rng}: {e}", Fore.RED)
+    return []
+
+async def get_sms(client: httpx.AsyncClient, rng: str, number: str) -> list:
+    base = get_base()
+    url = f"{base}/portal/sms/received/getsms/number"
+    payload = {"range": rng, "number": number}
+    
+    try:
+        r = await client.post(url, data=payload, headers=_recv_headers(base))
+        if is_worker_blocked(r):
             mark_worker_limited(base)
             return []
             
@@ -362,68 +298,56 @@ def get_sms(acc: dict, rng: str, number: str) -> list:
                 return data[:2]
             elif isinstance(data, dict):
                 return data.get("sms", [])[:2]
-    except Exception as e:
-        _log("SMS-ERR", f"error get_sms {number}: {e}", Fore.RED)
-        
+    except Exception:
+        pass
     return []
-    
-    
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# PLATFORM DETECTION  (emoji + nama lengkap)
+# PARSER & FORMATTER
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SERVICE_INFO = {
-    "WHATSAPP":  {"icon": "💬",  "name": "WhatsApp",  "short": "#WS"},
-    "TELEGRAM":  {"icon": "✈️",  "name": "Telegram",  "short": "#TG"},
-    "GOOGLE":    {"icon": "🔍",  "name": "Google",    "short": "#G" },
-    "FACEBOOK":  {"icon": "📘",  "name": "Facebook",  "short": "#FB"},
-    "INSTAGRAM": {"icon": "📷",  "name": "Instagram", "short": "#IG"},
-    "TIKTOK":    {"icon": "🎵",  "name": "TikTok",    "short": "#TT"},
-    "GRAB":      {"icon": "🚗",  "name": "Grab",      "short": "#GR"},
-    "GOJEK":     {"icon": "🛵",  "name": "Gojek",     "short": "#GJ"},
-    "SHOPEE":    {"icon": "🟠",  "name": "Shopee",    "short": "#SP"},
+    "WHATSAPP":  {"icon": "💬", "name": "WhatsApp",  "short": "#WS"},
+    "TELEGRAM":  {"icon": "✈️", "name": "Telegram",  "short": "#TG"},
+    "GOOGLE":    {"icon": "🔍", "name": "Google",    "short": "#G" },
+    "FACEBOOK":  {"icon": "📘", "name": "Facebook",  "short": "#FB"},
+    "INSTAGRAM": {"icon": "📷", "name": "Instagram", "short": "#IG"},
+    "TIKTOK":    {"icon": "🎵", "name": "TikTok",    "short": "#TT"},
+    "GRAB":      {"icon": "🚗", "name": "Grab",      "short": "#GR"},
+    "GOJEK":     {"icon": "🛵", "name": "Gojek",     "short": "#GJ"},
+    "SHOPEE":    {"icon": "🟠", "name": "Shopee",    "short": "#SP"},
     "TOKOPEDIA": {"icon": "🛍️", "name": "Tokopedia", "short": "#TP"},
 }
 _SVC_DEFAULT = {"icon": "💌", "name": "OTP", "short": "#OT"}
-
-_SVC_PATTERN = re.compile(
-    r"(WhatsApp|Telegram|Google|Facebook|Instagram|TikTok|Grab|Gojek|Shopee|Tokopedia)",
-    re.IGNORECASE,
-)
+_SVC_PATTERN = re.compile(r"(WhatsApp|Telegram|Google|Facebook|Instagram|TikTok|Grab|Gojek|Shopee|Tokopedia)", re.IGNORECASE)
 
 def detect_service(text: str) -> dict:
     m = _SVC_PATTERN.search(text)
-    if m:
-        return SERVICE_INFO.get(m.group(1).upper(), _SVC_DEFAULT)
-    return _SVC_DEFAULT
+    return SERVICE_INFO.get(m.group(1).upper(), _SVC_DEFAULT) if m else _SVC_DEFAULT
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# PHONE / COUNTRY HELPERS
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def code_to_flag(code: str) -> str:
     try:
         return "".join(chr(127397 + ord(c)) for c in code.upper())
-    except:
+    except Exception:
         return "🏳"
 
-def detect_country_and_flag(full_num: str, fallback_country="UNKNOWN"):
+def detect_country_and_flag(full_num: str, fallback="UNKNOWN"):
     try:
-        parsed  = phonenumbers.parse("+" + full_num, None)
-        region  = phonenumbers.region_code_for_number(parsed)
+        parsed = phonenumbers.parse("+" + full_num, None)
+        region = phonenumbers.region_code_for_number(parsed)
         if region:
-            flag         = code_to_flag(region)
-            country_name = geocoder.description_for_number(parsed, "en")
-            return (country_name.upper() if country_name else fallback_country), flag, region
-    except:
+            flag = code_to_flag(region)
+            desc = geocoder.description_for_number(parsed, "en")
+            return (desc.upper() if desc else fallback), flag, region
+    except Exception:
         pass
-    return fallback_country, "🏳", "??"
+    return fallback, "🏳", "??"
 
 def parse_range(rng: str):
-    country    = re.sub(r"\s*\(.*?\)", "", rng)
-    country    = re.sub(r"\d+", "", country)
-    country    = re.sub(r"\s+", " ", country).strip().upper()
+    country = re.sub(r"\s*\(.*?\)", "", rng)
+    country = re.sub(r"\d+", "", country)
+    country = re.sub(r"\s+", " ", country).strip().upper()
     code_match = re.search(r"\((\d+)\)", rng)
-    code       = code_match.group(1) if code_match else ""
+    code = code_match.group(1) if code_match else ""
     return country, code
 
 def normalize_number(num: str, country_code: str) -> str:
@@ -440,23 +364,9 @@ def mask_phone(number: str) -> str:
         return f"+{n[:4]}{'·' * 4}{n[-4:]}"
     return f"+{n}"
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# MESSAGE BUILDER  (tampilan premium Telegram HTML)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def build_otp_message(
-    otp:         str,
-    svc:         dict,
-    flag:        str,
-    country:     str,
-    region_code: str,
-    masked_num:  str,
-    full_number: str = ""  # masukkan variabel nomor asli tanpa sensor (misal "2250123456")
-) -> str:
+def build_otp_message(svc: dict, flag: str, masked_num: str, full_number: str) -> str:
     svc_tag = svc.get('short', '#OTP')
     svc_icon = svc.get('icon', '💬')
-    
-    # Ambil 6 digit pertama dari nomor HP asli sebagai prefix
-    # (Membersihkan karakter '+' atau spasi jika ada)
     clean_num = ''.join(filter(str.isdigit, full_number)) if full_number else ''.join(filter(str.isdigit, masked_num))
     prefix = clean_num[:6] if clean_num else "123456"
 
@@ -464,564 +374,223 @@ def build_otp_message(
         f"{flag} <b>{svc_tag}</b> {svc_icon} <code>{masked_num}</code> 🔴\n"
         f"Prefix: <tg-spoiler>{prefix}</tg-spoiler>"
     )
-    
-    
-    
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SENT CACHE  (dedup agar OTP tidak terkirim dua kali)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_sent_cache_lock = threading.Lock()
-_cache_dirty     = False
-_last_cache_save = 0.0
-
-def load_sent_cache() -> set:
-    os.makedirs("file", exist_ok=True)
-    if not os.path.exists(CACHE_FILE):
-        return set()
-    try:
-        with open(CACHE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return set(data) if isinstance(data, list) else set()
-    except:
-        return set()
-
-def save_sent_cache_now(cache: set):
-    try:
-        os.makedirs("file", exist_ok=True)
-        lst = list(cache)
-        if len(lst) > MAX_CACHE:
-            lst = lst[-MAX_CACHE:]
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(lst, f)
-    except Exception as e:
-        _log("CACHE", f"save error: {e}", Fore.YELLOW)
-
-sent_cache = load_sent_cache()
-
-def cache_add(uid: str):
-    global _cache_dirty, _last_cache_save
-    with _sent_cache_lock:
-        sent_cache.add(uid)
-    _cache_dirty = True
-    if time.time() - _last_cache_save >= 5:
-        with _sent_cache_lock:
-            save_sent_cache_now(sent_cache)
-        _last_cache_save = time.time()
-        _cache_dirty = False
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# GROUP TARGETS  (daftar grup tujuan OTP, bisa ditambah via /addbot)
+# TELEGRAM BOT SENDER (ASYNC)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_targets_lock    = threading.Lock()
-_forward_targets: set = {DEFAULT_TARGET}   # mulai dengan default group
-
-def _load_groups():
-    """Baca groups.json dan merge ke _forward_targets saat startup."""
-    if not os.path.exists(GROUPS_FILE):
-        return
-    try:
-        with open(GROUPS_FILE, "r", encoding="utf-8") as f:
-            ids = json.load(f)
-        if isinstance(ids, list):
-            with _targets_lock:
-                for gid in ids:
-                    _forward_targets.add(int(gid))
-        _log("GROUP", f"{len(ids)} grup dimuat dari {GROUPS_FILE}", Fore.CYAN)
-    except Exception as e:
-        _log("GROUP", f"load error: {e}", Fore.YELLOW)
-
-def _save_groups():
-    try:
-        os.makedirs("file", exist_ok=True)
-        with _targets_lock:
-            ids = list(_forward_targets)
-        with open(GROUPS_FILE, "w", encoding="utf-8") as f:
-            json.dump(ids, f)
-    except Exception as e:
-        _log("GROUP", f"save error: {e}", Fore.YELLOW)
-
-def add_group(chat_id: int) -> bool:
-    """Tambah grup. Return True jika baru, False jika sudah ada."""
-    with _targets_lock:
-        if chat_id in _forward_targets:
-            return False
-        _forward_targets.add(chat_id)
-    _save_groups()
-    return True
-
-def remove_group(chat_id: int) -> bool:
-    """Hapus grup. Return True jika berhasil, False jika tidak ada."""
-    with _targets_lock:
-        if chat_id not in _forward_targets or chat_id == DEFAULT_TARGET:
-            return False
-        _forward_targets.discard(chat_id)
-    _save_groups()
-    return True
-
-def list_groups() -> list:
-    with _targets_lock:
-        return list(_forward_targets)
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# TELEGRAM SEND
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_tg_session = requests.Session()
-_tg_session.mount("https://", requests.adapters.HTTPAdapter(
-    pool_connections=4, pool_maxsize=10, max_retries=0,
-))
-
-def _tg_post(chat_id, text, reply_markup=None, retries=3):
-    """Kirim satu pesan ke satu chat_id. Return True jika sukses."""
+async def tg_post(tg_client: httpx.AsyncClient, chat_id: int, text: str, reply_markup=None):
     payload = {
-        "chat_id":                  chat_id,
-        "text":                     text,
-        "parse_mode":               "HTML",
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    for attempt in range(retries):
-        try:
-            r    = _tg_session.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                json=payload,
-                timeout=10,
-            )
-            data = r.json()
-            if data.get("ok"):
-                return True
-            if r.status_code == 429:
-                wait = data.get("parameters", {}).get("retry_after", 5)
-                time.sleep(wait + 1)
-                continue
-            _log("TG-ERR", f"chat {chat_id}: {data.get('description', '?')}", Fore.RED)
-            return False
-        except Exception as e:
-            if attempt == retries - 1:
-                _log("TG-ERR", f"chat {chat_id}: {e}", Fore.RED)
-            else:
-                time.sleep(1.5 ** (attempt + 1))
-    return False
+        
+    try:
+        r = await tg_client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json=payload)
+        data = r.json()
+        if r.status_code == 429:
+            wait = data.get("parameters", {}).get("retry_after", 3)
+            await asyncio.sleep(wait)
+            return await tg_post(tg_client, chat_id, text, reply_markup)
+        return data.get("ok", False)
+    except Exception as e:
+        _log("TG-ERR", f"chat {chat_id}: {e}", Fore.RED)
+        return False
 
-def tg_send_msg(chat_id: int, text: str):
-    """Kirim pesan plain ke satu chat (untuk balasan command)."""
-    _tg_post(chat_id, text)
-
-def tg_send_otp(otp: str, msg_text: str):
-    # Ganti ALL_FILES_LINK dengan link channel/file kamu
-    ALL_FILES_LINK = "https://t.me/matchaappp" 
-
+async def tg_send_otp(tg_client: httpx.AsyncClient, otp: str, msg_text: str):
     kb = {
         "inline_keyboard": [
-            # Baris 1: Tombol Copy OTP (Hijau/Utama)
-            [{"text": f" {otp}", "copy_text": {"text": otp}}],
-            # Baris 2: Cuma All Files (Tanpa Panel)
+            [{"text": f"🔑 {otp}", "copy_text": {"text": otp}}],
             [{"text": "📁 All Files", "url": ALL_FILES_LINK}],
         ]
     }
-    
-    targets = list_groups()
+    targets = list(_forward_targets)
+    tasks = [tg_post(tg_client, cid, msg_text, reply_markup=kb) for cid in targets]
+    await asyncio.gather(*tasks)
 
-    def _send_one(cid):
-        _tg_post(cid, msg_text, reply_markup=kb)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ASYNC POLLING WORKER
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_OTP_RE = re.compile(r"\b\d{3}[- ]?\d{3}\b|\b\d{4,8}\b")
 
-    if len(targets) == 1:
-        _send_one(targets[0])
-    else:
-        with ThreadPoolExecutor(max_workers=min(8, len(targets)), thread_name_prefix="tgsend") as pool:
-            list(pool.map(_send_one, targets))
-            
+async def process_number_async(client: httpx.AsyncClient, tg_client: httpx.AsyncClient, acc: dict, rng: str, num: str, fallback_country: str, code: str):
+    global _cache_dirty
+    full_num = normalize_number(num, code)
+    if not full_num.isdigit():
+        return False
+
+    sms_list = await get_sms(client, rng, num)
+    found = False
+
+    for sms in sms_list:
+        clean = re.sub(r"\s+", " ", str(sms).replace("<#>", "")).strip()
+        uid = hashlib.md5(f"{num}-{clean}".encode()).hexdigest()
+
+        if uid in sent_cache:
+            continue
+
+        matches = _OTP_RE.findall(clean)
+        if not matches:
+            continue
+
+        otp = re.sub(r"[^0-9]", "", matches[0])
+        svc = detect_service(clean)
+        country, flag, region_code = detect_country_and_flag(full_num, fallback_country)
+        masked = mask_phone(full_num)
+
+        msg = build_otp_message(svc, flag, masked, full_num)
+        await tg_send_otp(tg_client, otp, msg)
+        
+        sent_cache.add(uid)
+        _cache_dirty = True
+
+        _log("OTP", f"{svc['icon']} {svc['name']:<10} {flag} {region_code} {masked} -> {otp}", Fore.GREEN)
+        found = True
+
+    return found
+
+async def poll_one_account(client: httpx.AsyncClient, tg_client: httpx.AsyncClient, acc: dict):
+    ranges = await get_ranges(acc, client)
+    if not ranges:
+        return False
+
+    found_any = False
+    for rng in ranges:
+        fallback_country, code = parse_range(rng)
+        numbers = await get_numbers(client, rng)
+        if not numbers:
+            continue
+
+        tasks = [process_number_async(client, tg_client, acc, rng, num, fallback_country, code) for num in numbers]
+        results = await asyncio.gather(*tasks)
+        if any(results):
+            found_any = True
+
+    return found_any
+
+async def account_worker_loop(acc: dict, tg_client: httpx.AsyncClient):
+    async with create_async_client(acc["cookies"]) as client:
+        _log("TASK+", f"Akun #{acc['idx']} — Async Polling aktif", Fore.GREEN)
+        while True:
+            try:
+                found = await poll_one_account(client, tg_client, acc)
+                await asyncio.sleep(0.5 if found else POLL_INTERVAL)
+            except Exception as e:
+                _log("WORKER", f"error akun #{acc['idx']}: {e}", Fore.RED)
+                await asyncio.sleep(5.0)
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# COMMAND HANDLER  (/addbot /removebot /listbot)
+# TELEGRAM COMMAND LISTENER (ASYNC)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def handle_command(update: dict):
-    """Proses satu update dari getUpdates. Tangani command yang dikenal."""
+async def handle_command(tg_client: httpx.AsyncClient, update: dict):
     msg = update.get("message") or update.get("edited_message")
     if not msg:
         return
 
-    chat      = msg.get("chat", {})
-    chat_id   = chat.get("id")
-    chat_type = chat.get("type", "")       # private / group / supergroup / channel
+    chat = msg.get("chat", {})
+    chat_id = chat.get("id")
+    chat_type = chat.get("type", "")
     chat_name = chat.get("title") or chat.get("username") or str(chat_id)
-    user      = msg.get("from", {})
-    user_id   = user.get("id", 0)
-    text      = (msg.get("text") or "").strip()
+    text = (msg.get("text") or "").strip()
 
-    # Ambil command (tanpa @botname suffix)
     cmd = text.split()[0].split("@")[0].lower() if text.startswith("/") else ""
 
     if cmd == "/addbot":
         if chat_type not in ("group", "supergroup"):
-            tg_send_msg(chat_id,
-                "⚠️ <b>Perintah ini hanya bisa digunakan di dalam grup.</b>\n"
-                "Tambahkan bot ke grup, lalu ketik <code>/addbot</code> di grup tersebut.")
+            await tg_post(tg_client, chat_id, "⚠️ <b>Gunakan perintah ini di dalam grup.</b>")
             return
 
-        if add_group(chat_id):
+        if chat_id not in _forward_targets:
+            _forward_targets.add(chat_id)
+            save_groups()
             _log("GROUP", f"✅ ditambahkan: {chat_name} ({chat_id})", Fore.GREEN)
-            tg_send_msg(chat_id,
-                f"╔{'═' * 26}╗\n"
-                f"  ✅  <b>BOT AKTIF</b>\n"
-                f"╚{'═' * 26}╝\n"
-                f"\n"
-                f"🏠  <b>{chat_name}</b>\n"
-                f"🆔  <code>{chat_id}</code>\n"
-                f"\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"✦  Grup ini sudah terdaftar.\n"
-                f"✦  OTP akan diteruskan ke sini secara otomatis.\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"\n"
-                f"<i>Gunakan /removebot untuk menonaktifkan.</i>")
+            await tg_post(tg_client, chat_id, f"✅ <b>Grup {chat_name} berhasil terdaftar untuk menerima OTP.</b>")
         else:
-            tg_send_msg(chat_id,
-                f"ℹ️  <b>{chat_name}</b> sudah terdaftar sebelumnya.\n"
-                f"Bot sudah aktif di grup ini.")
+            await tg_post(tg_client, chat_id, f"ℹ️ Grup {chat_name} sudah terdaftar sebelumnya.")
 
     elif cmd == "/removebot":
-        if chat_type not in ("group", "supergroup"):
-            return
-
         if chat_id == DEFAULT_TARGET:
-            tg_send_msg(chat_id,
-                "⛔  Grup utama tidak bisa dihapus dari daftar target.")
+            await tg_post(tg_client, chat_id, "⛔ Grup utama tidak bisa dihapus.")
             return
 
-        if remove_group(chat_id):
-            _log("GROUP", f"🗑️  dihapus: {chat_name} ({chat_id})", Fore.YELLOW)
-            tg_send_msg(chat_id,
-                f"🗑️  <b>{chat_name}</b> telah dikeluarkan dari daftar penerima OTP.\n"
-                f"Ketik /addbot untuk mendaftarkan kembali.")
-        else:
-            tg_send_msg(chat_id,
-                f"ℹ️  Grup ini tidak ada dalam daftar terdaftar.")
+        if chat_id in _forward_targets:
+            _forward_targets.remove(chat_id)
+            save_groups()
+            _log("GROUP", f"🗑️ dihapus: {chat_name} ({chat_id})", Fore.YELLOW)
+            await tg_post(tg_client, chat_id, f"🗑️ <b>Grup {chat_name} telah dihapus dari daftar OTP.</b>")
 
     elif cmd == "/listbot":
-        # Hanya bisa diakses owner (OWNER_ID) atau dari dalam grup mana pun
-        groups  = list_groups()
-        lines   = [f"  {i+1}.  <code>{gid}</code>" for i, gid in enumerate(groups)]
-        total   = len(groups)
-        tg_send_msg(chat_id,
-            f"╔{'═' * 26}╗\n"
-            f"  👥  <b>DAFTAR GRUP AKTIF</b>\n"
-            f"╚{'═' * 26}╝\n"
-            f"\n"
-            + "\n".join(lines) +
-            f"\n\n<i>Total: {total} grup terdaftar</i>")
+        groups = list(_forward_targets)
+        lines = [f"  {i+1}. <code>{gid}</code>" for i, gid in enumerate(groups)]
+        await tg_post(tg_client, chat_id, f"👥 <b>DAFTAR GRUP AKTIF ({len(groups)})</b>\n\n" + "\n".join(lines))
 
-def tg_update_listener():
-    """
-    Long-polling getUpdates dari Telegram.
-    Handle command /addbot /removebot /listbot.
-    Berjalan sebagai daemon thread terpisah.
-    """
-    offset  = 0
-    api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
-    _log("CMD", "update listener aktif", Fore.CYAN)
-
+async def tg_update_listener(tg_client: httpx.AsyncClient):
+    offset = 0
+    _log("CMD", "Telegram Update Listener Aktif", Fore.CYAN)
     while True:
         try:
-            resp = _tg_session.post(
-                api_url,
-                json={"offset": offset, "timeout": 30, "allowed_updates": ["message"]},
-                timeout=40,
+            r = await tg_client.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
+                json={"offset": offset, "timeout": 20, "allowed_updates": ["message"]},
+                timeout=30.0
             )
-            data = resp.json()
-            if not data.get("ok"):
-                time.sleep(5)
-                continue
-
-            for upd in data.get("result", []):
-                offset = upd["update_id"] + 1
-                try:
-                    handle_command(upd)
-                except Exception as e:
-                    _log("CMD", f"handle error: {e}", Fore.YELLOW)
-
-        except requests.exceptions.Timeout:
-            pass   # long-poll timeout normal, lanjut loop
-        except Exception as e:
-            _log("CMD", f"listener error: {e}", Fore.YELLOW)
-            time.sleep(5)
+            data = r.json()
+            if data.get("ok"):
+                for upd in data.get("result", []):
+                    offset = upd["update_id"] + 1
+                    await handle_command(tg_client, upd)
+        except Exception:
+            await asyncio.sleep(3.0)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# POLL ONE ACCOUNT
+# MAIN ASYNC ENGINE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_OTP_RE = re.compile(r"\b\d{3}[- ]?\d{3}\b")
-
-def poll_one(acc) -> bool:
-    """Ambil semua SMS baru dari satu akun. Return True jika ada OTP terkirim."""
-    found = False
-    ranges = []
-    try:
-        ranges = get_ranges_cached(acc)
-    except Exception as e:
-        _log("RANGE", f"akun #{acc['idx']}: {e}", Fore.YELLOW)
-        return False
-
-    def process_number(rng, num, fallback_country, code):
-        time.sleep(1.0)  # throttle request
-        full_num = normalize_number(num, code)
-        if not full_num.isdigit():
-            return False
-
-        try:
-            sms_list = get_sms(acc, rng, num)
-        except Exception as e:
-            _log("SMS", f"akun #{acc['idx']}: {e}", Fore.YELLOW)
-            return False
-
-        local_found = False
-        for sms in sms_list:
-            clean = re.sub(r"\s+", " ", sms.replace("<#>", "")).strip()
-            uid = hashlib.md5(f"{num}-{clean}".encode()).hexdigest()
-
-            with _sent_cache_lock:
-                if uid in sent_cache:
-                    continue
-
-            matches = _OTP_RE.findall(sms)
-            if not matches:
-                continue
-
-            otp = re.sub(r"[^0-9]", "", matches[0])
-            svc = detect_service(sms)
-            country, flag, region_code = detect_country_and_flag(full_num, fallback_country)
-            masked = mask_phone(full_num)
-
-            msg = build_otp_message(otp, svc, flag, country, region_code, masked, full_num)
-            tg_send_otp(otp, msg)
-            cache_add(uid)
-
-            _log(
-                "OTP",
-                f"{svc['icon']} {svc['name']:<10} {flag} {region_code} "
-                f"{masked} -> {otp}",
-                Fore.GREEN,
-            )
-            local_found = True
-
-        return local_found
-
-    for rng in ranges:
-        fallback_country, code = parse_range(rng)
-        try:
-            numbers = get_numbers(acc, rng)
-        except Exception as e:
-            _log("NUM", f"akun #{acc['idx']}: {e}", Fore.YELLOW)
-            continue
-
-        if not numbers:
-            continue
-
-        n_workers = 1
-        with ThreadPoolExecutor(max_workers=n_workers, thread_name_prefix="sms") as executor:
-            futs = [executor.submit(process_number, rng, n, fallback_country, code) for n in numbers]
-            for fut in as_completed(futs):
-                try:
-                    if fut.result():
-                        found = True
-                except Exception as e:
-                    _log("NUM", f"akun #{acc['idx']}: {e}", Fore.YELLOW)
-
-    return found
-    
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# ACCOUNT WORKER  (polling loop per akun)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def account_worker(acc):
-    sleep_time = 2.0
+async def cache_flush_loop():
     while True:
-        try:
-            # Jika semua worker sedang dibatasi, jangan terus menembak endpoint.
-            if all_workers_limited():
-                _log("WORKER", "semua worker cooldown — pause 60s", Fore.YELLOW)
-                time.sleep(60)
-                continue
+        save_sent_cache()
+        await asyncio.sleep(15.0)
 
-            found = poll_one(acc)
-            sleep_time = 0.0 if found else min(sleep_time + 0.5, POLL_INTERVAL_MAX)
-        except Exception as e:
-            _log("WORKER", f"error akun #{acc.get('idx')}: {e}", Fore.RED)
-            sleep_time = 5.0
-        
-        time.sleep(sleep_time)
-        
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# KEEPALIVE  (ping /portal agar session tidak expire)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_last_keepalive = {}
-
-def keepalive_worker(accounts):
-    _log("KEEPALIVE", f"aktif — ping tiap {KEEPALIVE_INTERVAL}s per akun", Fore.CYAN)
-    while True:
-        now = time.time()
-        for acc in accounts:
-            idx = acc["idx"]
-            if now - _last_keepalive.get(idx, 0) < KEEPALIVE_INTERVAL:
-                continue
-
-            session_ok = False
-            for _ in range(len(WORKER_POOL)):
-                base = get_base()
-                try:
-                    r = acc["session"].get(f"{base}/portal", timeout=15)
-                    if is_worker_blocked(r):
-                        _log("KEEPALIVE", f"worker rate-limited ({base}), pindah...", Fore.YELLOW)
-                        mark_worker_limited(base)
-                        continue
-                    if r.status_code == 200 and "/login" not in str(r.url):
-                        _recv_csrf_cache.pop(idx, None)
-                        _log("KA-OK", f"akun #{idx} — session aktif ✓", Fore.GREEN)
-                        session_ok = True
-                        break
-                    if "/login" in str(r.url):
-                        break
-                except Exception as e:
-                    _log("KA-ERR", f"{base}: {e}", Fore.YELLOW)
-                    mark_worker_limited(base)
-
-            if not session_ok:
-                _log(
-                    "KA-WARN",
-                    f"akun #{idx} — session tidak terverifikasi. "
-                    f"Update cookie.json & restart bot jika semua worker normal.",
-                    Fore.YELLOW,
-                )
-                if OWNER_ID and OWNER_ID != DEFAULT_TARGET:
-                    try:
-                        _tg_post(OWNER_ID,
-                            f"⚠️ <b>SESSION EXPIRED</b>\n\n"
-                            f"Akun #{idx} tidak bisa akses portal IVAS.\n"
-                            f"Perbarui <code>cookie.json</code> dengan cookie fresh "
-                            f"dari browser, lalu restart bot.")
-                    except:
-                        pass
-
-            _last_keepalive[idx] = now
-            time.sleep(2)
-        time.sleep(60)
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# HTTP HEALTH SERVER  (Railway healthcheck)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_bot_start_time = time.time()
-
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        path = self.path.split("?")[0].rstrip("/")
-        if path in ("", "/", "/health"):
-            self._respond(200, "text/plain", b"OK")
-        elif path == "/status":
-            up   = int(time.time() - _bot_start_time)
-            body = json.dumps({
-                "status":         "running",
-                "uptime_seconds": up,
-                "uptime":         f"{up // 3600}h {(up % 3600) // 60}m {up % 60}s",
-                "targets":        list_groups(),
-            }).encode()
-            self._respond(200, "application/json", body)
-        else:
-            self._respond(404, "text/plain", b"Not found")
-
-    def _respond(self, code, ctype, body):
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *args):
-        pass
-
-def run_health_server():
-    port = int(os.environ.get("PORT", 8080))
-    HTTPServer.allow_reuse_address = True
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    _log("SERVER", f"port {port}  |  /health  /status", Fore.CYAN)
-    server.serve_forever()
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# GRACEFUL SHUTDOWN
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def _shutdown(signum, frame):
-    _log("SHUTDOWN", "menyimpan cache & keluar...", Fore.YELLOW)
-    with _sent_cache_lock:
-        save_sent_cache_now(sent_cache)
-    _save_groups()
-    _log("SHUTDOWN", "selesai.", Fore.YELLOW)
-    sys.exit(0)
-
-signal.signal(signal.SIGTERM, _shutdown)
-signal.signal(signal.SIGINT,  _shutdown)
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# MAIN
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def main():
-    print(Fore.CYAN + Style.BRIGHT, end="")
+async def main():
+    print(Fore.CYAN + Style.BRIGHT)
     print("  ╔══════════════════════════════════════╗")
-    print("  ║   🕷  SPIDERMAT OTP BOT              ║")
-    print("  ║        FORWARD MODE                  ║")
-    print("  ╚══════════════════════════════════════╝")
-    print(Style.RESET_ALL)
+    print("  ║   🕷  SPIDERMAT OTP BOT (ASYNC)     ║")
+    print("  ║        FORWARD MODE — ULTRA FAST     ║")
+    print("  ╚══════════════════════════════════════╝" + Style.RESET_ALL)
 
     if not BOT_TOKEN:
-        _log("FATAL", "BOT_TOKEN belum diset! Set via environment variable.", Fore.RED)
+        _log("FATAL", "BOT_TOKEN belum diset!", Fore.RED)
         sys.exit(1)
 
-    # Muat daftar grup dari file (merge ke _forward_targets)
-    _load_groups()
+    load_groups()
+    load_sent_cache()
 
     cookies_list = load_cookies()
     if not cookies_list:
-        _log("FATAL", f"Tidak ada cookie valid di {COOKIE_FILE}. Isi dulu!", Fore.RED)
+        _log("FATAL", f"Tidak ada cookie valid di {COOKIE_FILE}!", Fore.RED)
         sys.exit(1)
 
-    accounts = []
-    for idx, ck in enumerate(cookies_list):
-        acc = {
-            "idx":        idx,
-            "cookies":    ck,
-            "session":    make_session(ck),
-            "csrf_token": "",
-        }
-        accounts.append(acc)
-        _log("COOKIE", f"Akun #{idx} — {len(ck)} cookie dimuat", Fore.GREEN)
+    accounts = [{"idx": i, "cookies": ck} for i, ck in enumerate(cookies_list)]
 
-    print()
-    _log("CONFIG", f"Default target  →  {DEFAULT_TARGET}",         Fore.CYAN)
-    _log("CONFIG", f"Total target    →  {len(list_groups())} grup", Fore.CYAN)
-    _log("CONFIG", f"Channel link    →  {CHANNEL_LINK}",           Fore.CYAN)
-    _log("CONFIG", f"Worker pool     →  {len(WORKER_POOL)} proxy",  Fore.CYAN)
-    _log("CONFIG", f"Keepalive       →  tiap {KEEPALIVE_INTERVAL}s", Fore.CYAN)
-    print()
+    async with httpx.AsyncClient(timeout=15.0) as tg_client:
+        tasks = [
+            asyncio.create_task(cache_flush_loop()),
+            asyncio.create_task(tg_update_listener(tg_client))
+        ]
 
-    # Jalankan semua thread background
-    threading.Thread(target=run_health_server,                     daemon=True, name="health").start()
-    threading.Thread(target=tg_update_listener,                    daemon=True, name="cmd-listener").start()
-    threading.Thread(target=keepalive_worker, args=(accounts,),    daemon=True, name="keepalive").start()
+        for acc in accounts:
+            tasks.append(asyncio.create_task(account_worker_loop(acc, tg_client)))
 
-    for acc in accounts:
-        threading.Thread(
-            target=account_worker, args=(acc,),
-            daemon=True, name=f"poll-{acc['idx']}",
-        ).start()
-        _log("THREAD+", f"Akun #{acc['idx']} — polling aktif", Fore.GREEN)
+        _log("CONFIG", f"Bot berjalan dengan {len(accounts)} akun IVAS.", Fore.CYAN)
+        await asyncio.gather(*tasks)
 
-    print()
-    _log("CONFIG", "Bot berjalan. Ketik /addbot di grup untuk mendaftarkan.", Fore.CYAN)
-
-    # Main thread: flush cache secara periodik
-    global _cache_dirty, _last_cache_save
-    while True:
-        if _cache_dirty and time.time() - _last_cache_save >= 5:
-            with _sent_cache_lock:
-                save_sent_cache_now(sent_cache)
-            _last_cache_save = time.time()
-            _cache_dirty     = False
-        time.sleep(5)
-
-main()
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        save_sent_cache()
+        save_groups()
+        _log("SHUTDOWN", "Bot berhasil dihentikan.", Fore.YELLOW)
+                               
