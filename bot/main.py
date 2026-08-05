@@ -324,31 +324,37 @@ def get_numbers(acc, rng, _retry=0):
     return list(set(numbers))
 
 def get_sms(acc: dict, rng: str, number: str) -> list:
+def get_sms(acc: dict, rng: str, number: str) -> list:
     """Ambil daftar SMS dari portal untuk nomor tertentu (hanya 2 SMS terbaru)."""
-    url = f"{get_base()}/api/sms"
-    params = {
-        "key": acc["key"],
+    base = get_base()
+    url = f"{base}/portal/sms/received/getsms/number"
+    
+    # Menyesuaikan dengan parameter & session akun kamu yang asli
+    payload = {
         "range": rng,
         "number": number
     }
     
     try:
-        r = requests.get(url, params=params, timeout=10)
+        # Menggunakan session dari acc jika ada
+        session = acc.get("session", requests)
+        r = session.post(url, data=payload, timeout=10)
+        
         if r.status_code == 429:
-            mark_worker_limited(get_base())
+            mark_worker_limited(base)
             return []
             
         if r.status_code == 200:
             data = r.json()
             if isinstance(data, list):
-                # Ambil 2 SMS paling atas/terbaru saja
                 return data[:2]
-            elif isinstance(data, dict) and "sms" in data:
-                return data["sms"][:2]
+            elif isinstance(data, dict):
+                return data.get("sms", [])[:2]
     except Exception as e:
         _log("SMS-ERR", f"error get_sms {number}: {e}", Fore.RED)
         
     return []
+            
     
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PLATFORM DETECTION  (emoji + nama lengkap)
