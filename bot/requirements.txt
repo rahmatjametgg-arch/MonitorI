@@ -1,5 +1,3 @@
+python-telegram-bot==22.7
 requests
-httpx
-beautifulsoup4
 phonenumbers
-colorama
