@@ -43,7 +43,7 @@ COOKIE_FILE        = "cookie.json"
 CACHE_FILE         = "file/sent_cache.json"
 GROUPS_FILE        = "file/groups.json"     # daftar grup tambahan via /addbot
 MAX_CACHE          = 2000
-POLL_INTERVAL_MAX  = 3.0    # detik — jeda maks saat tidak ada OTP baru
+POLL_INTERVAL_MAX  = 15.0    # detik — jeda maks saat tidak ada OTP baru
 KEEPALIVE_INTERVAL = 480    # detik — ping /portal tiap 8 menit
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -264,9 +264,9 @@ def get_ranges(acc, _retry=0):
         mark_worker_limited(worker_before)
         return get_ranges(acc, _retry + 1)
     if r.status_code == 429:
-        _ranges_429_until[idx] = now + 180
+        _ranges_429_until[idx] = now + 300
         entry = _ranges_cache.get(idx)
-        _log("RANGE", f"akun #{idx} — 429, cooldown 3 menit, pakai cache lama", Fore.YELLOW)
+        _log("RANGE", f"akun #{idx} — 429, cooldown 5 menit, pakai cache lama", Fore.YELLOW)
         return entry[1] if entry else []
     if "/login" in str(r.url):
         return []
@@ -752,7 +752,7 @@ def poll_one(acc) -> bool:
         return False
 
     def process_number(rng, num, fallback_country, code):
-        time.sleep(0.3)  # Jeda tipis agar tidak terkena rate limit
+        time.sleep(1.0)  # Throttle request agar lebih ramah rate limit
         full_num = normalize_number(num, code)
         if not full_num.isdigit():
             return False
@@ -806,7 +806,7 @@ def poll_one(acc) -> bool:
         if not numbers:
             continue
 
-        n_workers = min(3, len(numbers))
+        n_workers = 1
         with ThreadPoolExecutor(max_workers=n_workers, thread_name_prefix="sms") as executor:
             futs = [executor.submit(process_number, rng, n, fallback_country, code) for n in numbers]
             for fut in as_completed(futs):
