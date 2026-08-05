@@ -91,7 +91,7 @@ WORKER_POOL = [
 _worker_lock          = threading.Lock()
 _active_worker_idx    = 0
 _worker_limited_until = {}
-WORKER_LIMIT_COOLDOWN = 120   # Cukup 2 menit aja!
+WORKER_LIMIT_COOLDOWN = 300   # Cukup 2 menit aja!
 
 
 import random
@@ -264,9 +264,9 @@ def get_ranges(acc, _retry=0):
         mark_worker_limited(worker_before)
         return get_ranges(acc, _retry + 1)
     if r.status_code == 429:
-        _ranges_429_until[idx] = now + 300
+        _ranges_429_until[idx] = now + 180
         entry = _ranges_cache.get(idx)
-        _log("RANGE", f"akun #{idx} — 429, cooldown 5 menit, pakai cache lama", Fore.YELLOW)
+        _log("RANGE", f"akun #{idx} — 429, cooldown 3 menit, pakai cache lama", Fore.YELLOW)
         return entry[1] if entry else []
     if "/login" in str(r.url):
         return []
@@ -752,7 +752,7 @@ def poll_one(acc) -> bool:
         return False
 
     def process_number(rng, num, fallback_country, code):
-        time.sleep(1.0)  # Throttle request agar lebih ramah rate limit
+        time.sleep(1.0)  # throttle request
         full_num = normalize_number(num, code)
         if not full_num.isdigit():
             return False
@@ -825,6 +825,12 @@ def account_worker(acc):
     sleep_time = 2.0
     while True:
         try:
+            # Jika semua worker sedang dibatasi, jangan terus menembak endpoint.
+            if all_workers_limited():
+                _log("WORKER", "semua worker cooldown — pause 60s", Fore.YELLOW)
+                time.sleep(60)
+                continue
+
             found = poll_one(acc)
             sleep_time = 0.0 if found else min(sleep_time + 0.5, POLL_INTERVAL_MAX)
         except Exception as e:
