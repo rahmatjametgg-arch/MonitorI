@@ -116,7 +116,16 @@ def mark_worker_limited(url):
                 _active_worker_idx = idx
                 break
     _log("WORKER", f"rate-limited → pindah ke {get_base()}", Fore.YELLOW)
-    time.sleep(0.5)  # <--- TAMBAHKAN BARIS INI BIAR GAK NGESPAM LOG
+    time.sleep(0.5)  # jeda kecil agar log/request tidak beruntun
+
+
+def all_workers_limited():
+    """True jika semua worker sedang dalam cooldown."""
+    now = time.time()
+    with _worker_lock:
+        return bool(WORKER_POOL) and all(
+            _worker_limited_until.get(w, 0) > now for w in WORKER_POOL
+        )
     
 _RATE_LIMIT_MARKERS = (
     "temporarily rate limited", "error 1027", "please check back later",
