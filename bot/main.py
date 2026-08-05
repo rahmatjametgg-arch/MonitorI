@@ -301,15 +301,12 @@ def get_numbers(acc: dict, rng: str, _retry: int = 0) -> list:
     """Ambil daftar nomor telepon aktif dari range tertentu."""
     base = get_base()
     try:
-        csrf = get_csrf(acc, base)
-        if not csrf:
-            return []
-            
         worker_before = base
         r = acc["session"].post(
             f"{base}/portal/sms/received/getsms/number",
-            data={"_token": csrf, "start": "today", "end": "today", "range": rng},
+            data={"start": "today", "end": "today", "range": rng},
             headers=_recv_headers(base),
+            timeout=10
         )
         if is_worker_blocked(r) and _retry < len(WORKER_POOL) - 1:
             mark_worker_limited(worker_before)
@@ -360,6 +357,7 @@ def get_sms(acc: dict, rng: str, number: str) -> list:
         _log("SMS-ERR", f"error get_sms {number}: {e}", Fore.RED)
         
     return []
+    
     
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
